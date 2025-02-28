@@ -27,9 +27,9 @@ DEBUG = False
 # PubMed hyperparameter gridsearch and ablation study
 
 DATASETS = [
-    ("pubmed_val", PubmedDataset, {"file_path": "data/pubmed-release/val.txt"}),
+    ("pubmed_val", PubmedDataset, {"file_path": "data/pubmed-dataset/pubmed-dataset/val.txt"}),
     ("pubmed_val_no_sections", PubmedDataset,
-     {"file_path": "data/pubmed-release/val.txt", "no_sections": True}
+     {"file_path": "data/pubmed-dataset/pubmed-dataset/val.txt", "no_sections": True}
      ),
 ]
 EMBEDDERS = [
