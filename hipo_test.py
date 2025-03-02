@@ -4,6 +4,7 @@ from tqdm import tqdm
 import torch
 # Import HipoRank components
 from hipo_rank.dataset_iterators.pubmed import PubmedDataset
+from hipo_rank.dataset_iterators.billsum import BillsumDataset
 from hipo_rank.embedders.bert import BertEmbedder
 from hipo_rank.similarities.cos import CosSimilarity
 from hipo_rank.directions.edge import EdgeBased
@@ -19,7 +20,9 @@ output_dir.mkdir(exist_ok=True)
 print(f"Cuda avail: {torch.cuda.is_available()}")
 
 # Initialize components
-dataset = PubmedDataset(file_path=dataset_path)
+# dataset = PubmedDataset(file_path=dataset_path)
+dataset = BillsumDataset(split="test")
+
 embedder = BertEmbedder(
     bert_config_path="models/pacssum_models/bert_config.json",
     bert_model_path="models/pacssum_models/pytorch_model_finetuned.bin",
@@ -53,11 +56,6 @@ for sim, doc in zip(directed_sims, docs):
         "document_id": getattr(doc, "id", "unknown"),
         "summary": summary
     })
-    
-    # Print the summary text
-    print("\n===== SUMMARY =====")
-    for sent, _ in summary:
-        print(sent)
 
 # Save results
 with open(output_dir / "summaries.json", "w") as f:
