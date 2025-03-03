@@ -26,6 +26,15 @@ class BillsumDataset(object):
         self.no_sections = no_sections
         self.min_sent_len = min_sent_len
         
+        # Common abbreviations that shouldn't split sentences
+        self.abbreviations = [
+            "Stat.", "U.S.", "U.S.C.", "USC.", "et al.", "i.e.", "e.g.", 
+            "etc.", "cf.", "v.", "vs.", "fig.", "Fig.", "No.", "no.", 
+            "St.", "Dr.", "Mr.", "Mrs.", "Ms.", "Prof.", "Inc.", "Corp.",
+            "Ltd.", "Jan.", "Feb.", "Mar.", "Apr.", "Jun.", "Jul.", "Aug.",
+            "Sep.", "Sept.", "Oct.", "Nov.", "Dec."
+        ]
+        
         # Load dataset using datasets library
         dataset = load_dataset(dataset_name)
         raw_docs = dataset[split]
@@ -37,7 +46,7 @@ class BillsumDataset(object):
             cleaned_text = self._clean_text(item['text'])
             
             # Split summary into sentences
-            summary_sentences = [self._clean_text(s) for s in re.split(r'(?<=[.!?])\s+', item['summary']) if s.strip()]
+            summary_sentences = self._text_to_sentences(item['summary'])
             
             docs.append(BillsumDoc(
                 text=cleaned_text,
@@ -53,7 +62,7 @@ class BillsumDataset(object):
 
     def _clean_text(self, text: str) -> str:
         """Clean text by removing excessive whitespace and normalizing newlines"""
-        # Replace multiple spaces with single space
+        # Replace multiple whitespace characters (including newlines) with a single space
         text = re.sub(r'\s+', ' ', text)
         # Remove any trailing/leading whitespace
         return text.strip()
@@ -95,21 +104,55 @@ class BillsumDataset(object):
             else:
                 end_idx = len(doc.text)
             
-            # Extract section text and split into sentences
+            # Extract section text
             section_text = doc.text[start_idx:end_idx].strip()
-            sentences = self._text_to_sentences(section_text)
+            
+            # Skip the heading by finding the first period that's not part of the heading
+            # Look for a pattern like "SHORT TITLE." or "DEFINITIONS." at the beginning
+            heading_match = re.match(r'^([^.]+)\.', section_text)
+            sentences_text = section_text
+            heading = None
+            
+            if heading_match:
+                heading = heading_match.group(1).strip()
+                # Skip the heading when extracting sentences
+                sentences_text = section_text[len(heading_match.group(0)):].strip()
+            
+            sentences = self._text_to_sentences(sentences_text)
             
             if sentences:  # Only add non-empty sections
-                sections.append(Section(id=f"Section {section_num}", sentences=sentences))
+                section_id = f"Section {section_num}"
+                if heading:
+                    section_id += f": {heading}"
+                sections.append(Section(id=section_id, sentences=sentences))
         
         return sections
     
     def _text_to_sentences(self, text: str) -> List[str]:
-        """Split text into clean sentences"""
-        # Split into sentences and clean each one
-        sentences = [self._clean_text(s) for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+        """Split text into clean sentences with improved handling for abbreviations"""
+        if not text:
+            return []
+        
+        # Temporarily replace known abbreviations to prevent incorrect splitting
+        placeholder_map = {}
+        for i, abbr in enumerate(self.abbreviations):
+            placeholder = f"___ABBR{i}___"
+            placeholder_map[placeholder] = abbr
+            text = text.replace(abbr, placeholder)
+        
+        # Split into sentences using period-space pattern
+        raw_sentences = re.split(r'(?<=[.!?])\s+', text)
+        
+        # Restore abbreviations
+        cleaned_sentences = []
+        for s in raw_sentences:
+            if s.strip():
+                for placeholder, abbr in placeholder_map.items():
+                    s = s.replace(placeholder, abbr)
+                cleaned_sentences.append(self._clean_text(s))
+        
         # Filter by minimum length requirement
-        return [s for s in sentences if len([w for w in s.split() if w.isalpha()]) >= self.min_sent_len]
+        return [s for s in cleaned_sentences if len([w for w in s.split() if w.isalpha()]) >= self.min_sent_len]
     
     def _get_reference(self, doc: BillsumDoc) -> List[str]:
         return doc.summary

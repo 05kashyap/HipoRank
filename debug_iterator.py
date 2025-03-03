@@ -22,7 +22,6 @@ def create_debug_file(split="test", num_docs=5):
             "document_id": getattr(doc, "id", f"doc_{i}"),
             "title": dataset.docs[i].title,
             "num_sections": len(doc.sections),
-            "total_sentences": sum(len(section.sentences) for section in doc.sections),
             "sections": []
         }
         
@@ -31,12 +30,15 @@ def create_debug_file(split="test", num_docs=5):
             section_info = {
                 "section_id": section.id,
                 "num_sentences": len(section.sentences),
-                "sentences": section.sentences
+                "sentences": section.sentences[:10]  # Show first 10 sentences only to keep output manageable
             }
             doc_info["sections"].append(section_info)
         
         # Include reference summary for comparison
         doc_info["reference_summary"] = doc.reference
+        
+        # Original raw text (first 500 chars)
+        doc_info["original_text_sample"] = dataset.docs[i].text[:500] + "..."
         
         debug_data.append(doc_info)
     
@@ -48,8 +50,4 @@ def create_debug_file(split="test", num_docs=5):
     print(f"Debug information saved to {output_file}")
 
 if __name__ == "__main__":
-    # Create debug files for different splits
-    create_debug_file("test", num_docs=5)
-    # Uncomment to debug other splits:
-    # create_debug_file("train", num_docs=5)
-    # create_debug_file("ca_test", num_docs=5)
+    create_debug_file("test", num_docs=3)
