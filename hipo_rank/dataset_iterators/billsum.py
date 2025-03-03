@@ -129,31 +129,54 @@ class BillsumDataset(object):
         return sections
     
     def _text_to_sentences(self, text: str) -> List[str]:
-        """Split text into clean sentences with improved handling for abbreviations"""
+        """Split text into clean sentences with robust handling for legal abbreviations"""
         if not text:
             return []
         
-        # Temporarily replace known abbreviations to prevent incorrect splitting
+        # Handle common legal citation patterns before general abbreviation handling
+        # Protect patterns like "10 U.S.C. 123" from being split
+        citation_pattern = r'(\d+\s+U\.S\.C\.\s+\d+)'
+        citation_placeholders = {}
+        for i, match in enumerate(re.finditer(citation_pattern, text)):
+            placeholder = f"___CITATION{i}___"
+            citation_placeholders[placeholder] = match.group(0)
+            text = text.replace(match.group(0), placeholder)
+        
+        # Special handling for U.S.C. as it's particularly problematic
+        text = text.replace("U.S.C.", "___USC___")
+        
+        # Handle other abbreviations
         placeholder_map = {}
         for i, abbr in enumerate(self.abbreviations):
-            placeholder = f"___ABBR{i}___"
-            placeholder_map[placeholder] = abbr
-            text = text.replace(abbr, placeholder)
+            if abbr != "U.S.C.":  # Skip since we already handled it
+                placeholder = f"___ABBR{i}___"
+                placeholder_map[placeholder] = abbr
+                # Use word boundary to avoid partial matches
+                text = re.sub(r'\b' + re.escape(abbr) + r'\b', placeholder, text)
         
-        # Split into sentences using period-space pattern
-        raw_sentences = re.split(r'(?<=[.!?])\s+', text)
+        # Split into sentences - using a more robust pattern that handles spacing better
+        raw_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
         
-        # Restore abbreviations
+        # Restore abbreviations and citations
         cleaned_sentences = []
         for s in raw_sentences:
             if s.strip():
+                # Restore specific U.S.C.
+                s = s.replace("___USC___", "U.S.C.")
+                
+                # Restore general abbreviations
                 for placeholder, abbr in placeholder_map.items():
                     s = s.replace(placeholder, abbr)
+                
+                # Restore legal citations
+                for placeholder, citation in citation_placeholders.items():
+                    s = s.replace(placeholder, citation)
+                    
                 cleaned_sentences.append(self._clean_text(s))
         
-        # Filter by minimum length requirement
+        # Filter by minimum length requirement and remove any empty sentences
         return [s for s in cleaned_sentences if len([w for w in s.split() if w.isalpha()]) >= self.min_sent_len]
-    
+
     def _get_reference(self, doc: BillsumDoc) -> List[str]:
         return doc.summary
     
