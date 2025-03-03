@@ -33,11 +33,14 @@ class BillsumDataset(object):
         # Convert to our document format
         docs = []
         for i, item in enumerate(raw_docs):
+            # Clean and normalize text
+            cleaned_text = self._clean_text(item['text'])
+            
             # Split summary into sentences
-            summary_sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', item['summary']) if s.strip()]
+            summary_sentences = [self._clean_text(s) for s in re.split(r'(?<=[.!?])\s+', item['summary']) if s.strip()]
             
             docs.append(BillsumDoc(
-                text=item['text'],
+                text=cleaned_text,
                 summary=summary_sentences,
                 title=item['title'],
                 id=str(i)
@@ -47,6 +50,13 @@ class BillsumDataset(object):
             docs = self._filter_doc_len(docs, min_words, max_words)
             
         self.docs = docs
+
+    def _clean_text(self, text: str) -> str:
+        """Clean text by removing excessive whitespace and normalizing newlines"""
+        # Replace multiple spaces with single space
+        text = re.sub(r'\s+', ' ', text)
+        # Remove any trailing/leading whitespace
+        return text.strip()
 
     def _filter_doc_len(self, docs: List[BillsumDoc], min_words: int, max_words: int):
         def f(doc: BillsumDoc):
@@ -61,8 +71,7 @@ class BillsumDataset(object):
     def _get_sections(self, doc: BillsumDoc) -> List[Section]:
         if self.no_sections:
             # Treat the entire document as a single section
-            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', doc.text) if s.strip()]
-            sentences = [s for s in sentences if len([w for w in s.split() if w.isalpha()]) >= self.min_sent_len]
+            sentences = self._text_to_sentences(doc.text)
             return [Section(id="no_sections", sentences=sentences)]
         
         # Find all section markers and their positions
@@ -71,8 +80,7 @@ class BillsumDataset(object):
         
         # If no sections found, return whole text as one section
         if not matches:
-            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', doc.text) if s.strip()]
-            sentences = [s for s in sentences if len([w for w in s.split() if w.isalpha()]) >= self.min_sent_len]
+            sentences = self._text_to_sentences(doc.text)
             return [Section(id="full_text", sentences=sentences)]
         
         # Process each section
@@ -89,13 +97,19 @@ class BillsumDataset(object):
             
             # Extract section text and split into sentences
             section_text = doc.text[start_idx:end_idx].strip()
-            sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', section_text) if s.strip()]
-            sentences = [s for s in sentences if len([w for w in s.split() if w.isalpha()]) >= self.min_sent_len]
+            sentences = self._text_to_sentences(section_text)
             
             if sentences:  # Only add non-empty sections
                 sections.append(Section(id=f"Section {section_num}", sentences=sentences))
         
         return sections
+    
+    def _text_to_sentences(self, text: str) -> List[str]:
+        """Split text into clean sentences"""
+        # Split into sentences and clean each one
+        sentences = [self._clean_text(s) for s in re.split(r'(?<=[.!?])\s+', text) if s.strip()]
+        # Filter by minimum length requirement
+        return [s for s in sentences if len([w for w in s.split() if w.isalpha()]) >= self.min_sent_len]
     
     def _get_reference(self, doc: BillsumDoc) -> List[str]:
         return doc.summary
