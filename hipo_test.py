@@ -29,8 +29,8 @@ output_dir.mkdir(exist_ok=True)
 print(f"Cuda avail: {torch.cuda.is_available()}")
 
 # Initialize components
-# dataset = PubmedDataset(file_path=dataset_path)
-dataset = BillsumDataset(split="test")
+dataset = PubmedDataset(file_path=dataset_path)
+# dataset = BillsumDataset(split="test")
 
 embedder = BertEmbedder(
     bert_config_path="models/pacssum_models/bert_config.json",

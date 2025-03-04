@@ -2,6 +2,8 @@ from datasets import load_dataset
 from typing import List, Iterator, Any, Optional
 from dataclasses import dataclass
 import re
+import spacy
+from tqdm import tqdm
 from hipo_rank import Document, Section
 
 
@@ -26,15 +28,19 @@ class BillsumDataset(object):
         self.no_sections = no_sections
         self.min_sent_len = min_sent_len
         
-        # Common abbreviations that shouldn't split sentences
-        self.abbreviations = [
-            "Stat.", "U.S.", "U.S.C.", "USC.", "et al.", "i.e.", "e.g.", 
-            "etc.", "cf.", "v.", "vs.", "fig.", "Fig.", "No.", "no.", 
-            "St.", "Dr.", "Mr.", "Mrs.", "Ms.", "Prof.", "Inc.", "Corp.",
-            "Ltd.", "Jan.", "Feb.", "Mar.", "Apr.", "Jun.", "Jul.", "Aug.",
-            "Sep.", "Sept.", "Oct.", "Nov.", "Dec."
-        ]
+        # Load spaCy model - "en_core_web_sm" is a good choice for basic English processing
+        try:
+            self.nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            print("Downloading spaCy model...")
+            spacy.cli.download("en_core_web_sm")
+            self.nlp = spacy.load("en_core_web_sm")
         
+        # Configure spaCy for our needs - only keep what we need for performance
+        self.nlp.disable_pipes(["tagger", "parser", "ner", "lemmatizer", "attribute_ruler"])
+        # Enable sentence segmentation which is what we need
+        self.nlp.enable_pipe("senter")
+            
         # Load dataset using datasets library
         dataset = load_dataset(dataset_name)
         raw_docs = dataset[split]
@@ -45,7 +51,7 @@ class BillsumDataset(object):
             # Clean and normalize text
             cleaned_text = self._clean_text(item['text'])
             
-            # Split summary into sentences
+            # Split summary into sentences using spaCy
             summary_sentences = self._text_to_sentences(item['summary'])
             
             docs.append(BillsumDoc(
@@ -129,53 +135,18 @@ class BillsumDataset(object):
         return sections
     
     def _text_to_sentences(self, text: str) -> List[str]:
-        """Split text into clean sentences with robust handling for legal abbreviations"""
+        """Split text into sentences using spaCy's sentence segmentation"""
         if not text:
             return []
         
-        # Handle common legal citation patterns before general abbreviation handling
-        # Protect patterns like "10 U.S.C. 123" from being split
-        citation_pattern = r'(\d+\s+U\.S\.C\.\s+\d+)'
-        citation_placeholders = {}
-        for i, match in enumerate(re.finditer(citation_pattern, text)):
-            placeholder = f"___CITATION{i}___"
-            citation_placeholders[placeholder] = match.group(0)
-            text = text.replace(match.group(0), placeholder)
+        # Process the text with spaCy
+        doc = self.nlp(text)
         
-        # Special handling for U.S.C. as it's particularly problematic
-        text = text.replace("U.S.C.", "___USC___")
-        
-        # Handle other abbreviations
-        placeholder_map = {}
-        for i, abbr in enumerate(self.abbreviations):
-            if abbr != "U.S.C.":  # Skip since we already handled it
-                placeholder = f"___ABBR{i}___"
-                placeholder_map[placeholder] = abbr
-                # Use word boundary to avoid partial matches
-                text = re.sub(r'\b' + re.escape(abbr) + r'\b', placeholder, text)
-        
-        # Split into sentences - using a more robust pattern that handles spacing better
-        raw_sentences = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
-        
-        # Restore abbreviations and citations
-        cleaned_sentences = []
-        for s in raw_sentences:
-            if s.strip():
-                # Restore specific U.S.C.
-                s = s.replace("___USC___", "U.S.C.")
-                
-                # Restore general abbreviations
-                for placeholder, abbr in placeholder_map.items():
-                    s = s.replace(placeholder, abbr)
-                
-                # Restore legal citations
-                for placeholder, citation in citation_placeholders.items():
-                    s = s.replace(placeholder, citation)
-                    
-                cleaned_sentences.append(self._clean_text(s))
+        # Extract sentences as strings and clean them
+        sentences = [self._clean_text(sent.text) for sent in doc.sents]
         
         # Filter by minimum length requirement and remove any empty sentences
-        return [s for s in cleaned_sentences if len([w for w in s.split() if w.isalpha()]) >= self.min_sent_len]
+        return [s for s in sentences if s and len([w for w in s.split() if w.isalpha()]) >= self.min_sent_len]
 
     def _get_reference(self, doc: BillsumDoc) -> List[str]:
         return doc.summary
