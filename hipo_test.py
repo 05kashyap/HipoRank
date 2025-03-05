@@ -2,7 +2,6 @@ from pathlib import Path
 import json
 from tqdm import tqdm
 import torch
-# Import HipoRank components
 from hipo_rank.dataset_iterators.pubmed import PubmedDataset
 from hipo_rank.dataset_iterators.billsum import BillsumDataset
 from hipo_rank.embedders.bert import BertEmbedder
@@ -21,16 +20,14 @@ parser.add_argument("--eval", action="store_true", help="Evaluate generated summ
 
 args = parser.parse_args()
 
-# Set up parameters
-dataset_path = "data/pubmed-dataset/pubmed-dataset/test.txt"  # Change this to your input file
+dataset_path = "data/pubmed-dataset/pubmed-dataset/test.txt"  
 output_dir = Path("summary_output")
 output_dir.mkdir(exist_ok=True)
 
 print(f"Cuda avail: {torch.cuda.is_available()}")
 
-# Initialize components
-dataset = PubmedDataset(file_path=dataset_path)
-# dataset = BillsumDataset(split="test")
+# dataset = PubmedDataset(file_path=dataset_path)
+dataset = BillsumDataset(split="test")
 
 embedder = BertEmbedder(
     bert_config_path="models/pacssum_models/bert_config.json",

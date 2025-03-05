@@ -9,7 +9,6 @@ from hipo_rank import Document, Section
 
 @dataclass
 class BillsumDoc:
-    # dataclass wrapper for original billsum dataset format
     text: str
     summary: List[str]
     title: str
@@ -33,7 +32,6 @@ class BillsumDataset(object):
             gpu_available = spacy.prefer_gpu()
             print(f"GPU acceleration for spaCy: {'Enabled' if gpu_available else 'Not available'}")
         
-        # Load spaCy model - "en_core_web_sm" is a good choice for basic English processing
         try:
             self.nlp = spacy.load("en_core_web_sm")
         except OSError:
@@ -41,9 +39,9 @@ class BillsumDataset(object):
             spacy.cli.download("en_core_web_sm")
             self.nlp = spacy.load("en_core_web_sm")
         
-        # Configure spaCy for our needs - only keep what we need for performance
+
         self.nlp.disable_pipes(["tagger", "parser", "ner", "lemmatizer", "attribute_ruler"])
-        # Enable sentence segmentation which is what we need
+        # Enable sentence segmentation 
         self.nlp.enable_pipe("senter")
             
         # Load dataset using datasets library
@@ -121,8 +119,7 @@ class BillsumDataset(object):
             # Extract section text
             section_text = doc.text[start_idx:end_idx].strip()
             
-            # Skip the heading by finding the first period that's not part of the heading
-            # Look for a pattern like "SHORT TITLE." or "DEFINITIONS." at the beginning
+            
             heading_match = re.match(r'^([^.]+)\.', section_text)
             sentences_text = section_text
             heading = None
