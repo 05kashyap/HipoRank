@@ -23,10 +23,15 @@ class BillsumDataset(object):
                  no_sections: bool = False,
                  min_words: Optional[int] = None,
                  max_words: Optional[int] = None,
-                 min_sent_len: int = 1  # min num of alphabetical words
+                 min_sent_len: int = 1,  # min num of alphabetical words
+                 use_gpu: bool = True  # Control GPU usage
                  ):
         self.no_sections = no_sections
         self.min_sent_len = min_sent_len
+        
+        if use_gpu:
+            gpu_available = spacy.prefer_gpu()
+            print(f"GPU acceleration for spaCy: {'Enabled' if gpu_available else 'Not available'}")
         
         # Load spaCy model - "en_core_web_sm" is a good choice for basic English processing
         try:
@@ -42,12 +47,14 @@ class BillsumDataset(object):
         self.nlp.enable_pipe("senter")
             
         # Load dataset using datasets library
+        print(f"Loading {split} split from {dataset_name}...")
         dataset = load_dataset(dataset_name)
         raw_docs = dataset[split]
         
         # Convert to our document format
+        print(f"Processing {len(raw_docs)} documents...")
         docs = []
-        for i, item in enumerate(raw_docs):
+        for i, item in enumerate(tqdm(raw_docs, desc="Preparing documents")):
             # Clean and normalize text
             cleaned_text = self._clean_text(item['text'])
             
@@ -65,6 +72,7 @@ class BillsumDataset(object):
             docs = self._filter_doc_len(docs, min_words, max_words)
             
         self.docs = docs
+        print(f"Loaded {len(self.docs)} documents")
 
     def _clean_text(self, text: str) -> str:
         """Clean text by removing excessive whitespace and normalizing newlines"""
