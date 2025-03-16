@@ -33,7 +33,7 @@ if torch.cuda.is_available():
 OUTPUT_DIR = Path("bert_extractive_output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 MODEL_NAME = "bert-base-uncased"
-BATCH_SIZE = 8
+BATCH_SIZE = 16
 EPOCHS = 3
 LEARNING_RATE = 2e-5
 MAX_GRAD_NORM = 1.0
@@ -278,11 +278,11 @@ def evaluate_rouge(predicted_summaries, reference_summaries):
 def main():
     # Load dataset
     print("Loading BillSum dataset...")
-    # train_dataset = BillsumDataset(split="train")
+    train_dataset = BillsumDataset(split="train")
     test_dataset = BillsumDataset(split="test")
     
-    train_docs = list(test_dataset)[:5]
-    test_docs = list(test_dataset)[:5]
+    train_docs = list(train_dataset)
+    test_docs = list(test_dataset)
     
     # Initialize tokenizer
     tokenizer = BertTokenizer.from_pretrained(MODEL_NAME)
