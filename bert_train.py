@@ -15,6 +15,18 @@ from transformers import (
 from rouge import Rouge
 import sys
 import os
+import argparse
+
+argparser = argparse.ArgumentParser()
+argparser.add_argument("--batch_size", type=int, default=16)
+argparser.add_argument("--epochs", type=int, default=3)
+argparser.add_argument("--learning_rate", type=float, default=2e-5)
+argparser.add_argument("--warmup_steps", type=int, default=0)
+argparser.add_argument("--max_seq_length", type=int, default=512)
+argparser.add_argument("--summary_length", type=int, default=200)
+argparser.add_argument("--train_ratio", type=int, default=10)
+args = argparser.parse_args()
+
 
 # Fix import path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -33,13 +45,16 @@ if torch.cuda.is_available():
 OUTPUT_DIR = Path("bert_extractive_output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 MODEL_NAME = "bert-base-uncased"
-BATCH_SIZE = 16
-EPOCHS = 6
-LEARNING_RATE = 2e-5
+
+TRAIN_RATIO = args.train_ratio  # Reduce training data by a factor of n
+
+BATCH_SIZE = args.batch_size
+EPOCHS = args.epochs
+LEARNING_RATE = args.learning_rate
 MAX_GRAD_NORM = 1.0
-WARMUP_STEPS = 0
-MAX_SEQ_LENGTH = 512
-SUMMARY_LENGTH = 200  # Number of words for generated summaries
+WARMUP_STEPS = args.warmup_steps
+MAX_SEQ_LENGTH = args.max_seq_length
+SUMMARY_LENGTH = args.summary_length  # Number of words for generated summaries
 
 # Set device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -282,6 +297,7 @@ def main():
     test_dataset = BillsumDataset(split="test")
     
     train_docs = list(train_dataset)
+    train_docs = train_docs[:len(train_docs)//TRAIN_RATIO] 
     test_docs = list(test_dataset)
     
     # Initialize tokenizer
