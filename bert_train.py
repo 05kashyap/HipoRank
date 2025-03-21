@@ -18,6 +18,7 @@ import os
 import argparse
 
 argparser = argparse.ArgumentParser()
+argparser.add_argument("--dataset", type=str, default="billsum")
 argparser.add_argument("--batch_size", type=int, default=16)
 argparser.add_argument("--epochs", type=int, default=3)
 argparser.add_argument("--learning_rate", type=float, default=2e-5)
@@ -31,6 +32,7 @@ args = argparser.parse_args()
 # Fix import path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from hipo_rank.dataset_iterators.billsum import BillsumDataset
+from hipo_rank.dataset_iterators.ilc import ILCDataset
 from hipo_rank import Document
 
 # Set random seeds for reproducibility
@@ -45,7 +47,7 @@ if torch.cuda.is_available():
 OUTPUT_DIR = Path("bert_extractive_output")
 OUTPUT_DIR.mkdir(exist_ok=True)
 MODEL_NAME = "bert-base-uncased"
-
+DATASET = args.dataset
 TRAIN_RATIO = args.train_ratio  # Reduce training data by a factor of n
 
 BATCH_SIZE = args.batch_size
@@ -151,8 +153,6 @@ class SentenceLabelingDataset(Dataset):
             'doc_idx': self.inputs[idx]['doc_idx'],
             'label': torch.tensor(self.labels[idx], dtype=torch.long)
         }
-
-# The rest of the functions remain mostly the same
 
 def train_model(model, train_dataloader, optimizer, scheduler, device):
     model.train()
@@ -292,9 +292,16 @@ def evaluate_rouge(predicted_summaries, reference_summaries):
 
 def main():
     # Load dataset
-    print("Loading BillSum dataset...")
-    train_dataset = BillsumDataset(split="train")
-    test_dataset = BillsumDataset(split="test")
+    if DATASET == "billsum":
+        print("Loading BillSum dataset...")
+        train_dataset = BillsumDataset(split="train")
+        test_dataset = BillsumDataset(split="test")
+    elif DATASET == "ilc":
+        print("Loading ILC dataset...")
+        train_dataset = ILCDataset(split="train")
+        test_dataset = ILCDataset(split="test")
+    else:
+        raise ValueError(f"Invalid dataset: {DATASET}")
     
     train_docs = list(train_dataset)
     train_docs = train_docs[:len(train_docs)//TRAIN_RATIO] 
