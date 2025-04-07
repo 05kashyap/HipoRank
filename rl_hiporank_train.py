@@ -31,7 +31,7 @@ def set_random_seed(seed):
 def train_rl_hiporank(documents, embedder, similarity, direction, scorer, 
                       num_episodes=1000, max_summary_sentences=10, max_words=200,
                       checkpoint_dir="checkpoints", log_interval=50):
-    """Train the RL-HipoRank model"""
+    """Train the RL-HipoRank model with simplified approach"""
     # Create checkpoint directory
     checkpoint_path = Path(checkpoint_dir)
     checkpoint_path.mkdir(exist_ok=True, parents=True)
@@ -53,23 +53,22 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
     documents = filtered_documents
     
     # Initialize agent with appropriate state size
-    # This is a rough estimate - actual size depends on embedding dimension and document length
+    # Get a sample document to determine dimensions
     sample_doc = documents[0]
-    sample_embeddings = embedder.get_embeddings(sample_doc)
-    sample_similarities = similarity.get_similarities(sample_embeddings)
-    sample_directed_sims = direction.update_directions(sample_similarities)
-    
-    # Create a sample state to determine the state dimension
-    sample_state = create_state(sample_doc, sample_embeddings, sample_directed_sims)
-    print(f"State shape: {len(sample_state)}, first few values: {sample_state[:10]}")
-    state_size = len(sample_state)
     
     # Count total sentences in the document (across all sections)
     total_sentences = 0
     for section in sample_doc.sections:
         total_sentences += len(section.sentences)
     
-    # Fix: Set a reasonable action space size based on observed documents
+    # Calculate simplified state size (see new create_state function)
+    max_sentences = min(100, total_sentences)
+    
+    # Size = [doc features (5) + position features (max_sentences) + 
+    #         word count features (max_sentences) + summary mask (max_sentences)]
+    state_size = 5 + (3 * max_sentences)
+    
+    # Set a reasonable action space size based on observed documents
     action_size = 100  # This should accommodate most documents
     print(f"Document has {total_sentences} total sentences across {len(sample_doc.sections)} sections")
     print(f"Initializing agent with state_size={state_size}, action_size={action_size}")
@@ -90,7 +89,7 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
         while not valid_doc and retries < 5:
             try:
                 doc = random.choice(documents)
-                # Get HipoRank features
+                # Get HipoRank features - with simplified approach
                 embeddings = embedder.get_embeddings(doc)
                 similarities = similarity.get_similarities(embeddings)
                 directed_sims = direction.update_directions(similarities)
@@ -170,6 +169,9 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
         # Log progress
         if (episode + 1) % log_interval == 0:
             avg_reward = np.mean(episode_rewards[-log_interval:])
+            
+            # Update learning rate schedulers based on performance
+            agent.update_lr_schedulers(avg_reward)
             
             # Update training stats
             for key, value in update_stats.items():

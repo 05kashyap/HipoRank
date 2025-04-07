@@ -132,14 +132,49 @@ class RLHipoRankAgent:
             
             # Apply mask by setting logits of invalid actions to a large negative value
             masked_logits = action_logits.clone()
-            masked_logits[action_mask == 0] = float('-inf')
+            masked_logits[action_mask == 0] = -1e8  # Use finite negative value to avoid NaN
             
-            # Convert to probabilities
+            # Add numerical stability to prevent NaNs in softmax
+            masked_logits = masked_logits - masked_logits.max()
+            
+            # Check for NaN or infinity values and fix them
+            if torch.isnan(masked_logits).any() or torch.isinf(masked_logits).any():
+                print("Warning: NaN or Inf values in logits, using uniform distribution over valid actions")
+                # Use uniform distribution over valid actions
+                action = random.choice(valid_actions)
+                return action
+            
+            # Convert to probabilities with increased numerical stability
             action_probs = F.softmax(masked_logits, dim=-1)
             
-            # Sample action based on probabilities
-            action_dist = torch.distributions.Categorical(action_probs)
-            action = action_dist.sample().item()
+            # Check for NaN in probabilities
+            if torch.isnan(action_probs).any():
+                print("Warning: NaN values in probabilities, using uniform distribution")
+                action = random.choice(valid_actions)
+                return action
+            
+            # Ensure non-zero probabilities for valid actions (prevent zeros from numerical issues)
+            min_prob = 1e-8
+            for idx in valid_actions:
+                action_probs[idx] = max(min_prob, action_probs[idx])
+            
+            # Re-normalize probabilities
+            action_probs = action_probs / action_probs.sum()
+            
+            # Force valid action with highest probability if distribution fails
+            try:
+                action_dist = torch.distributions.Categorical(action_probs)
+                action = action_dist.sample().item()
+            except Exception as e:
+                print(f"Error sampling action: {e}, selecting highest probability action")
+                action = valid_actions[0]  # Default to first valid action
+                max_prob = action_probs[valid_actions[0]]
+                
+                # Find action with highest probability
+                for a in valid_actions:
+                    if action_probs[a] > max_prob:
+                        max_prob = action_probs[a]
+                        action = a
             
             return action
         except Exception as e:
