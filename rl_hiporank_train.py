@@ -61,6 +61,7 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
     # Training metrics
     episode_rewards = []
     best_avg_reward = float('-inf')
+    training_stats = {'actor_loss': [], 'critic_loss': [], 'entropy': [], 'mean_reward': []}
     
     # Training loop
     for episode in tqdm(range(num_episodes), desc="Training Episodes"):
@@ -77,7 +78,7 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
         
         # Initialize episode
         state = env.reset()
-        states, actions, rewards = [], [], []
+        states, actions, rewards, valid_action_masks = [], [], [], []
         episode_reward = 0
         done = False
         
@@ -87,9 +88,18 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
             valid_actions = env.available_actions
             if not valid_actions:
                 break
+            
+            # Create valid action mask
+            valid_mask = torch.zeros(action_size)
+            valid_mask[valid_actions] = 1.0
+            valid_action_masks.append(valid_mask.tolist())
                 
-            # Get action from agent
-            action = agent.get_action(state, valid_actions)
+            # Get action from agent with epsilon-greedy exploration
+            if random.random() < max(0.1, 1.0 - episode / (num_episodes * 0.75)):  # Decay epsilon
+                action = random.choice(valid_actions)
+            else:
+                action = agent.get_action(state, valid_actions)
+                
             if action is None:
                 break
                 
@@ -106,8 +116,12 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
             # Move to next state
             state = next_state
             
+        # Skip update if episode was too short
+        if len(states) < 2:
+            continue
+            
         # Update agent after episode
-        agent.train(states, actions, rewards)
+        update_stats = agent.train(states, actions, rewards, valid_action_masks)
         
         # Track progress
         episode_rewards.append(episode_reward)
@@ -115,7 +129,17 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
         # Log progress
         if (episode + 1) % log_interval == 0:
             avg_reward = np.mean(episode_rewards[-log_interval:])
-            print(f"Episode {episode+1}/{num_episodes}, Avg Reward: {avg_reward:.4f}")
+            
+            # Update training stats
+            for key, value in update_stats.items():
+                if key in training_stats:
+                    training_stats[key].append(value)
+            training_stats['mean_reward'].append(avg_reward)
+            
+            print(f"Episode {episode+1}/{num_episodes}, Avg Reward: {avg_reward:.4f}, "
+                  f"Actor Loss: {update_stats['actor_loss']:.4f}, "
+                  f"Critic Loss: {update_stats['critic_loss']:.4f}, "
+                  f"Entropy: {update_stats['entropy']:.4f}")
             
             # Save checkpoint if improved
             if avg_reward > best_avg_reward:
@@ -125,6 +149,10 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
     
     # Save final model
     agent.save_model(checkpoint_path / "final_model.pt")
+    
+    # Save training statistics
+    with open(checkpoint_path / "training_stats.json", "w") as f:
+        json.dump(training_stats, f)
     
     return agent, episode_rewards
 
@@ -236,9 +264,31 @@ def main():
         checkpoint_dir=args.checkpoint_dir
     )
     
-    # Save training rewards
-    with open(output_dir / "training_rewards.json", "w") as f:
-        json.dump({"rewards": rewards}, f)
+    # Save training rewards with more detailed metrics
+    episode_data = {
+        "rewards": rewards,
+        "moving_avg_10": [np.mean(rewards[max(0, i-9):i+1]) for i in range(len(rewards))],
+        "moving_avg_50": [np.mean(rewards[max(0, i-49):i+1]) for i in range(len(rewards))],
+        "moving_avg_100": [np.mean(rewards[max(0, i-99):i+1]) for i in range(len(rewards))]
+    }
+    
+    with open(output_dir / "training_metrics.json", "w") as f:
+        json.dump(episode_data, f)
+    
+    # Plot training curve
+    try:
+        import matplotlib.pyplot as plt
+        plt.figure(figsize=(10, 6))
+        plt.plot(rewards, alpha=0.3, label='Episode Rewards')
+        plt.plot(episode_data['moving_avg_50'], label='50-Episode Moving Avg')
+        plt.plot(episode_data['moving_avg_100'], label='100-Episode Moving Avg')
+        plt.xlabel('Episode')
+        plt.ylabel('Reward')
+        plt.title('RL-HipoRank Training Progress')
+        plt.legend()
+        plt.savefig(output_dir / "training_curve.png")
+    except ImportError:
+        print("Matplotlib not available for plotting")
     
     # Evaluate if requested
     if args.eval:
