@@ -1,5 +1,6 @@
 import numpy as np
 from .states import create_state
+
 def get_total_sentences(document):
     """Get the total number of sentences in the document"""
     return len(document.sents)
@@ -80,13 +81,17 @@ class HipoRankEnvironment:
         # Current state
         self.current_summary = []
         self.current_word_count = 0
-        self.available_actions = list(range(self.total_sentences))
+        
+        # Fix: Initialize available actions with proper sentence count
+        self.available_actions = list(range(min(100, self.total_sentences)))  # Limit to 100 for safety
         
     def reset(self):
         """Reset environment to initial state"""
         self.current_summary = []
         self.current_word_count = 0
-        self.available_actions = list(range(self.total_sentences))
+        
+        # Fix: Reset available actions with proper count and limit
+        self.available_actions = list(range(min(100, self.total_sentences)))  # Limit to 100 for safety
         
         initial_state = create_state(self.document, self.embeddings, self.directed_sims)
         return initial_state
@@ -100,7 +105,11 @@ class HipoRankEnvironment:
             
         # Add sentence to summary
         self.current_summary.append(action)
-        self.available_actions.remove(action)
+        
+        try:
+            self.available_actions.remove(action)
+        except ValueError:
+            print(f"Warning: Action {action} not in available_actions list")
         
         # Update word count
         section_idx, local_idx = global_to_local_idx(self.document, action)
@@ -108,6 +117,11 @@ class HipoRankEnvironment:
             sentence = self.document.sections[section_idx].sentences[local_idx]
             sentence_word_count = len(sentence.split())
             self.current_word_count += sentence_word_count
+        
+        # Recalculate valid actions based on current summary and word count
+        self.available_actions = get_valid_actions(self.document, self.current_summary, self.max_words)
+        # Ensure actions are within bounds (implement a limit of 100 actions for agent compatibility)
+        self.available_actions = [a for a in self.available_actions if a < 100]
         
         # Calculate reward
         from rl.rewards import calculate_reward

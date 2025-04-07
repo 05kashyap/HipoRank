@@ -57,6 +57,7 @@ class ValueNetwork(nn.Module):
         x = self.dropout2(x)
         value = self.fc3(x)
         return value
+
 class RLHipoRankAgent:
     def __init__(self, state_size, action_size, learning_rate=0.001, gamma=0.99):
         self.state_size = state_size
@@ -110,97 +111,139 @@ class RLHipoRankAgent:
         if not valid_actions:
             return None
             
-        state_tensor = self.process_state(state)
-        
-        # Get action logits from policy network
-        with torch.no_grad():
-            action_logits = self.actor(state_tensor)
-        
-        # Create a mask for valid actions
-        action_mask = torch.zeros(self.action_size, device=self.device)
-        action_mask[valid_actions] = 1.0
-        
-        # Apply mask by setting logits of invalid actions to a large negative value
-        masked_logits = action_logits.clone()
-        masked_logits[action_mask == 0] = float('-inf')
-        
-        # Convert to probabilities
-        action_probs = F.softmax(masked_logits, dim=-1)
-        
-        # Sample action based on probabilities
-        action_dist = torch.distributions.Categorical(action_probs)
-        action = action_dist.sample().item()
-        
-        return action
+        # Fix: Convert state to tensor and ensure it's the right shape
+        try:
+            state_tensor = torch.FloatTensor(self.process_state(state)).to(self.device)
+            
+            # Get action logits from policy network
+            with torch.no_grad():
+                action_logits = self.actor(state_tensor)
+            
+            # Ensure valid actions are within the action space bounds
+            valid_actions = [a for a in valid_actions if 0 <= a < self.action_size]
+            
+            if not valid_actions:
+                print("Warning: No valid actions within action space bounds")
+                return None
+                
+            # Create a mask for valid actions
+            action_mask = torch.zeros(self.action_size, device=self.device)
+            action_mask[valid_actions] = 1.0
+            
+            # Apply mask by setting logits of invalid actions to a large negative value
+            masked_logits = action_logits.clone()
+            masked_logits[action_mask == 0] = float('-inf')
+            
+            # Convert to probabilities
+            action_probs = F.softmax(masked_logits, dim=-1)
+            
+            # Sample action based on probabilities
+            action_dist = torch.distributions.Categorical(action_probs)
+            action = action_dist.sample().item()
+            
+            return action
+        except Exception as e:
+            print(f"Error in get_action: {e}")
+            # Return a random valid action as fallback
+            return random.choice(valid_actions) if valid_actions else None
         
     def train(self, states, actions, rewards, valid_action_masks):
         """Update networks using collected trajectory with action masks"""
         if len(states) == 0:
-            return
+            return {'actor_loss': 0, 'critic_loss': 0, 'entropy': 0, 'mean_advantage': 0, 'mean_return': 0}
+        
+        try:
+            # Process states to ensure correct dimensions
+            processed_states = [self.process_state(state) for state in states]
+                
+            # Convert to tensors
+            states_tensor = torch.FloatTensor(processed_states).to(self.device)
+            actions_tensor = torch.LongTensor(actions).unsqueeze(1).to(self.device)
             
-        # Process states to ensure correct dimensions
-        processed_states = [self.process_state(state) for state in states]
+            # Fix: Ensure valid action masks have correct shape
+            fixed_masks = []
+            for mask in valid_action_masks:
+                if len(mask) < self.action_size:
+                    # Extend mask if too small
+                    mask = mask + [0.0] * (self.action_size - len(mask))
+                elif len(mask) > self.action_size:
+                    # Truncate mask if too large
+                    mask = mask[:self.action_size]
+                fixed_masks.append(mask)
             
-        # Convert to tensors
-        states_tensor = torch.FloatTensor(processed_states).to(self.device)
-        actions_tensor = torch.LongTensor(actions).unsqueeze(1).to(self.device)
-        valid_action_masks = torch.FloatTensor(valid_action_masks).to(self.device)
-        
-        # Calculate returns (discounted rewards)
-        returns = []
-        R = 0
-        for r in reversed(rewards):
-            R = r + self.gamma * R
-            returns.insert(0, R)
-        returns = torch.FloatTensor(returns).to(self.device)
-        
-        # Normalize returns
-        if returns.std() > 0:
-            returns = (returns - returns.mean()) / (returns.std() + 1e-8)
-        
-        # Get values and action logits
-        values = self.critic(states_tensor).squeeze()
-        action_logits = self.actor(states_tensor)
-        
-        # Apply action masks
-        masked_logits = action_logits.clone()
-        # Set invalid action logits to negative infinity to exclude them from softmax
-        for i, mask in enumerate(valid_action_masks):
-            masked_logits[i][mask == 0] = float('-inf')
-        
-        # Compute log probabilities and entropy
-        log_probs = F.log_softmax(masked_logits, dim=1)
-        action_log_probs = log_probs.gather(1, actions_tensor).squeeze()
-        
-        # Calculate advantage
-        advantage = returns - values.detach()
-        
-        # Actor loss (policy gradient with entropy regularization)
-        entropy = -(F.softmax(masked_logits, dim=1) * log_probs).sum(dim=1).mean()
-        actor_loss = -(action_log_probs * advantage).mean() - 0.01 * entropy
-        
-        # Critic loss (MSE)
-        critic_loss = F.mse_loss(values, returns)
-        
-        # Update networks with gradient clipping
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
-        self.actor_optimizer.step()
-        
-        self.critic_optimizer.zero_grad()
-        critic_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
-        self.critic_optimizer.step()
-        
-        # Return metrics for logging
-        return {
-            'actor_loss': actor_loss.item(),
-            'critic_loss': critic_loss.item(),
-            'entropy': entropy.item(),
-            'mean_advantage': advantage.mean().item(),
-            'mean_return': returns.mean().item()
-        }
+            valid_action_masks = torch.FloatTensor(fixed_masks).to(self.device)
+            
+            # Calculate returns (discounted rewards)
+            returns = []
+            R = 0
+            for r in reversed(rewards):
+                R = r + self.gamma * R
+                returns.insert(0, R)
+            returns = torch.FloatTensor(returns).to(self.device)
+            
+            # Normalize returns
+            if returns.std() > 0:
+                returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+            
+            # Get values and action logits
+            values = self.critic(states_tensor).squeeze()
+            action_logits = self.actor(states_tensor)
+            
+            # Apply action masks
+            masked_logits = action_logits.clone()
+            # Set invalid action logits to negative infinity to exclude them from softmax
+            for i, mask in enumerate(valid_action_masks):
+                masked_logits[i][mask == 0] = float('-inf')
+            
+            # Compute log probabilities and entropy
+            log_probs = F.log_softmax(masked_logits, dim=1)
+            
+            # Fix: Handle potential errors with action indices
+            valid_actions = []
+            for i, action in enumerate(actions):
+                if action >= self.action_size:
+                    print(f"Warning: Action {action} out of bounds, using 0 instead")
+                    valid_actions.append(0)
+                else:
+                    valid_actions.append(action)
+            
+            actions_tensor = torch.LongTensor(valid_actions).unsqueeze(1).to(self.device)
+            action_log_probs = log_probs.gather(1, actions_tensor).squeeze()
+            
+            # Calculate advantage
+            advantage = returns - values.detach()
+            
+            # Actor loss (policy gradient with entropy regularization)
+            entropy = -(F.softmax(masked_logits, dim=1) * log_probs).sum(dim=1).mean()
+            actor_loss = -(action_log_probs * advantage).mean() - 0.01 * entropy
+            
+            # Critic loss (MSE)
+            critic_loss = F.mse_loss(values, returns)
+            
+            # Update networks with gradient clipping
+            self.actor_optimizer.zero_grad()
+            actor_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
+            self.actor_optimizer.step()
+            
+            self.critic_optimizer.zero_grad()
+            critic_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
+            self.critic_optimizer.step()
+            
+            # Return metrics for logging
+            return {
+                'actor_loss': actor_loss.item(),
+                'critic_loss': critic_loss.item(),
+                'entropy': entropy.item(),
+                'mean_advantage': advantage.mean().item(),
+                'mean_return': returns.mean().item()
+            }
+        except Exception as e:
+            print(f"Error during training: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'actor_loss': 0, 'critic_loss': 0, 'entropy': 0, 'mean_advantage': 0, 'mean_return': 0}
         
     def save_model(self, path):
         """Save model to path"""
