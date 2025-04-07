@@ -7,31 +7,56 @@ import random
 from collections import deque
 
 class PolicyNetwork(nn.Module):
-    def __init__(self, state_size, action_size, hidden_size=128):
+    def __init__(self, state_size, action_size):
         super(PolicyNetwork, self).__init__()
-        self.fc1 = nn.Linear(state_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, action_size)  # Output logit for each possible action
+        self.fc1 = nn.Linear(state_size, 128)
+        self.dropout1 = nn.Dropout(0.3)
+        self.fc2 = nn.Linear(128, 128)
+        self.dropout2 = nn.Dropout(0.3)
+        self.fc3 = nn.Linear(128, action_size)
         
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
+        # Initialize weights
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                nn.init.constant_(m.bias, 0.0)
+        
+    def forward(self, state):
+        x = F.relu(self.fc1(state))
+        x = self.dropout1(x)
         x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+        x = self.dropout2(x)
+        logits = self.fc3(x)
+        return logits
 
 class ValueNetwork(nn.Module):
-    def __init__(self, state_size, hidden_size=128):
+    def __init__(self, state_size):
         super(ValueNetwork, self).__init__()
-        self.fc1 = nn.Linear(state_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, 1)
+        self.fc1 = nn.Linear(state_size, 128)
+        self.dropout1 = nn.Dropout(0.3)
+        self.fc2 = nn.Linear(128, 128)
+        self.dropout2 = nn.Dropout(0.3)
+        self.fc3 = nn.Linear(128, 1)
         
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
+        # Initialize weights
+        self._initialize_weights()
+        
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.orthogonal_(m.weight, gain=np.sqrt(2))
+                nn.init.constant_(m.bias, 0.0)
+        
+    def forward(self, state):
+        x = F.relu(self.fc1(state))
+        x = self.dropout1(x)
         x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
-
+        x = self.dropout2(x)
+        value = self.fc3(x)
+        return value
 class RLHipoRankAgent:
     def __init__(self, state_size, action_size, learning_rate=0.001, gamma=0.99):
         self.state_size = state_size
@@ -47,6 +72,19 @@ class RLHipoRankAgent:
         # Optimizers
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=learning_rate)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=learning_rate)
+        
+        # Learning rate schedulers
+        self.actor_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.actor_optimizer, mode='max', factor=0.5, patience=100, verbose=True
+        )
+        self.critic_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.critic_optimizer, mode='max', factor=0.5, patience=100, verbose=True
+        )
+
+    # Add a method to update learning rate schedulers
+    def update_lr_schedulers(self, avg_reward):
+        self.actor_scheduler.step(avg_reward)
+        self.critic_scheduler.step(avg_reward)
         
     def process_state(self, state):
         """Ensure the state has the correct dimensions"""
@@ -70,34 +108,33 @@ class RLHipoRankAgent:
     def get_action(self, state, valid_actions):
         """Select action based on current state with dynamic action space handling"""
         if not valid_actions:
-            return None  # No valid actions available
+            return None
+            
+        state_tensor = self.process_state(state)
         
-        # Process the state to ensure correct dimensions    
-        state_processed = self.process_state(state)
-        state_tensor = torch.FloatTensor(state_processed).unsqueeze(0).to(self.device)
-        
-        # Get logits for all actions
+        # Get action logits from policy network
         with torch.no_grad():
-            action_logits = self.actor(state_tensor).cpu().numpy().flatten()
+            action_logits = self.actor(state_tensor)
         
-        # Create a mask based on valid actions
-        # Only consider actions within the network's output range
-        valid_actions_in_range = [a for a in valid_actions if a < len(action_logits)]
-        if not valid_actions_in_range:
-            print("Warning: All valid actions are outside the network's output range")
-            return valid_actions[0]  # Fall back to first valid action
+        # Create a mask for valid actions
+        action_mask = torch.zeros(self.action_size, device=self.device)
+        action_mask[valid_actions] = 1.0
         
-        # Filter to only valid actions
-        masked_logits = np.ones_like(action_logits) * float('-inf')
-        for action in valid_actions_in_range:
-            masked_logits[action] = action_logits[action]
+        # Apply mask by setting logits of invalid actions to a large negative value
+        masked_logits = action_logits.clone()
+        masked_logits[action_mask == 0] = float('-inf')
         
-        # Select action with highest probability
-        action = np.argmax(masked_logits)
+        # Convert to probabilities
+        action_probs = F.softmax(masked_logits, dim=-1)
+        
+        # Sample action based on probabilities
+        action_dist = torch.distributions.Categorical(action_probs)
+        action = action_dist.sample().item()
+        
         return action
         
-    def train(self, states, actions, rewards):
-        """Update networks using collected trajectory"""
+    def train(self, states, actions, rewards, valid_action_masks):
+        """Update networks using collected trajectory with action masks"""
         if len(states) == 0:
             return
             
@@ -107,6 +144,7 @@ class RLHipoRankAgent:
         # Convert to tensors
         states_tensor = torch.FloatTensor(processed_states).to(self.device)
         actions_tensor = torch.LongTensor(actions).unsqueeze(1).to(self.device)
+        valid_action_masks = torch.FloatTensor(valid_action_masks).to(self.device)
         
         # Calculate returns (discounted rewards)
         returns = []
@@ -124,24 +162,45 @@ class RLHipoRankAgent:
         values = self.critic(states_tensor).squeeze()
         action_logits = self.actor(states_tensor)
         
+        # Apply action masks
+        masked_logits = action_logits.clone()
+        # Set invalid action logits to negative infinity to exclude them from softmax
+        for i, mask in enumerate(valid_action_masks):
+            masked_logits[i][mask == 0] = float('-inf')
+        
+        # Compute log probabilities and entropy
+        log_probs = F.log_softmax(masked_logits, dim=1)
+        action_log_probs = log_probs.gather(1, actions_tensor).squeeze()
+        
         # Calculate advantage
         advantage = returns - values.detach()
+        
+        # Actor loss (policy gradient with entropy regularization)
+        entropy = -(F.softmax(masked_logits, dim=1) * log_probs).sum(dim=1).mean()
+        actor_loss = -(action_log_probs * advantage).mean() - 0.01 * entropy
         
         # Critic loss (MSE)
         critic_loss = F.mse_loss(values, returns)
         
-        # Actor loss (policy gradient)
-        selected_logits = action_logits.gather(1, actions_tensor).squeeze()
-        actor_loss = -(selected_logits * advantage).mean()
-        
-        # Update networks
+        # Update networks with gradient clipping
         self.actor_optimizer.zero_grad()
         actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 0.5)
         self.actor_optimizer.step()
         
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), 0.5)
         self.critic_optimizer.step()
+        
+        # Return metrics for logging
+        return {
+            'actor_loss': actor_loss.item(),
+            'critic_loss': critic_loss.item(),
+            'entropy': entropy.item(),
+            'mean_advantage': advantage.mean().item(),
+            'mean_return': returns.mean().item()
+        }
         
     def save_model(self, path):
         """Save model to path"""

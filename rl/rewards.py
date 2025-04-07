@@ -199,7 +199,7 @@ def calculate_coherence(document, selected_indices, directed_sims):
     return coherence_score
 
 def calculate_reward(document, selected_indices, directed_sims):
-    """Calculate combined reward based on coverage, diversity, and coherence"""
+    """Calculate combined reward based on coverage, diversity, and coherence with improved normalization"""
     if not selected_indices:
         return 0.0
     
@@ -208,7 +208,7 @@ def calculate_reward(document, selected_indices, directed_sims):
     diversity = calculate_diversity(document, selected_indices, directed_sims)
     coherence = calculate_coherence(document, selected_indices, directed_sims)
     
-    # Length reward - encourage using most of the available length
+    # Length reward - encourage using most of the available length but penalize exceeding
     total_words = 0
     for idx in selected_indices:
         section_idx, local_idx = global_to_local_idx(document, idx)
@@ -216,12 +216,28 @@ def calculate_reward(document, selected_indices, directed_sims):
             sentence = document.sections[section_idx].sentences[local_idx]
             total_words += len(sentence.split())
     
-    length_reward = min(1.0, total_words / 200.0)  # Normalized to max 200 words
+    # Length reward that peaks at the target word count
+    target_words = 200
+    length_ratio = total_words / target_words
+    length_reward = max(0.0, 1.0 - abs(1.0 - length_ratio))
+    
+    # Position reward - prefer sentences from beginning sections (usually more important)
+    position_scores = []
+    for idx in selected_indices:
+        section_idx, local_idx = global_to_local_idx(document, idx)
+        if section_idx is not None and local_idx is not None:
+            # Normalize by section position and local position
+            section_weight = 1.0 - (section_idx / max(1, len(document.sections) - 1))
+            local_weight = 1.0 - (local_idx / max(1, len(document.sections[section_idx].sentences) - 1))
+            position_scores.append(0.7 * section_weight + 0.3 * local_weight)
+    
+    position_reward = sum(position_scores) / len(position_scores) if position_scores else 0.0
     
     # Combine scores with weights
-    reward = (0.4 * coverage + 
-              0.3 * diversity + 
-              0.2 * coherence + 
-              0.1 * length_reward)
+    reward = (0.35 * coverage + 
+              0.25 * diversity + 
+              0.20 * coherence + 
+              0.15 * length_reward +
+              0.05 * position_reward)
     
     return reward
