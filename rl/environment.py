@@ -83,7 +83,9 @@ class HipoRankEnvironment:
         self.current_word_count = 0
         
         # Fix: Initialize available actions with proper sentence count
-        self.available_actions = list(range(min(100, self.total_sentences)))  # Limit to 100 for safety
+        # Ensure actions don't exceed 100 to match agent's action space
+        self.action_size = 100  # Keep consistent with agent
+        self.available_actions = list(range(min(self.action_size, self.total_sentences)))
         
     def reset(self):
         """Reset environment to initial state"""
@@ -91,7 +93,7 @@ class HipoRankEnvironment:
         self.current_word_count = 0
         
         # Fix: Reset available actions with proper count and limit
-        self.available_actions = list(range(min(100, self.total_sentences)))  # Limit to 100 for safety
+        self.available_actions = list(range(min(self.action_size, self.total_sentences)))
         
         initial_state = create_state(self.document, self.embeddings, self.directed_sims)
         return initial_state
@@ -109,7 +111,7 @@ class HipoRankEnvironment:
         try:
             self.available_actions.remove(action)
         except ValueError:
-            print(f"Warning: Action {action} not in available_actions list")
+            pass  # Action already removed or not in list
         
         # Update word count
         section_idx, local_idx = global_to_local_idx(self.document, action)
@@ -120,8 +122,8 @@ class HipoRankEnvironment:
         
         # Recalculate valid actions based on current summary and word count
         self.available_actions = get_valid_actions(self.document, self.current_summary, self.max_words)
-        # Ensure actions are within bounds (implement a limit of 100 actions for agent compatibility)
-        self.available_actions = [a for a in self.available_actions if a < 100]
+        # Ensure actions are within bounds for agent compatibility
+        self.available_actions = [a for a in self.available_actions if a < self.action_size]
         
         # Calculate reward
         from rl.rewards import calculate_reward

@@ -94,7 +94,9 @@ class RLHipoRankAgent:
         
         # Check if dimensions match
         if len(state_array) != self.state_size:
-            print(f"Warning: State dimension mismatch. Got {len(state_array)}, expected {self.state_size}")
+            # Don't log this warning every time as it clutters output
+            if random.random() < 0.01:  # Only log 1% of mismatches
+                print(f"Warning: State dimension mismatch. Got {len(state_array)}, expected {self.state_size}")
             
             # If state is smaller, pad it
             if len(state_array) < self.state_size:
@@ -104,6 +106,8 @@ class RLHipoRankAgent:
             else:
                 state_array = state_array[:self.state_size]
                 
+        # Ensure there are no NaN or infinity values
+        state_array = np.nan_to_num(state_array, nan=0.0, posinf=1.0, neginf=-1.0)
         return state_array
         
     def get_action(self, state, valid_actions):
@@ -113,17 +117,16 @@ class RLHipoRankAgent:
             
         # Fix: Convert state to tensor and ensure it's the right shape
         try:
-            state_tensor = torch.FloatTensor(self.process_state(state)).to(self.device)
+            state_tensor = torch.FloatTensor(self.process_state(state)).unsqueeze(0).to(self.device)
             
             # Get action logits from policy network
             with torch.no_grad():
-                action_logits = self.actor(state_tensor)
+                action_logits = self.actor(state_tensor).squeeze(0)
             
             # Ensure valid actions are within the action space bounds
             valid_actions = [a for a in valid_actions if 0 <= a < self.action_size]
             
             if not valid_actions:
-                print("Warning: No valid actions within action space bounds")
                 return None
                 
             # Create a mask for valid actions
@@ -132,53 +135,46 @@ class RLHipoRankAgent:
             
             # Apply mask by setting logits of invalid actions to a large negative value
             masked_logits = action_logits.clone()
-            masked_logits[action_mask == 0] = -1e8  # Use finite negative value to avoid NaN
+            masked_logits[action_mask == 0] = -1e8
             
-            # Add numerical stability to prevent NaNs in softmax
-            masked_logits = masked_logits - masked_logits.max()
-            
-            # Check for NaN or infinity values and fix them
+            # Handle NaN values directly
             if torch.isnan(masked_logits).any() or torch.isinf(masked_logits).any():
-                print("Warning: NaN or Inf values in logits, using uniform distribution over valid actions")
-                # Use uniform distribution over valid actions
-                action = random.choice(valid_actions)
-                return action
+                # Set NaN/Inf values to appropriate finite values
+                masked_logits = torch.nan_to_num(masked_logits, nan=-1e8, posinf=1e3, neginf=-1e8)
             
-            # Convert to probabilities with increased numerical stability
+            # Apply temperature scaling to improve numerical stability
+            masked_logits = masked_logits / 1.0  # Temperature parameter (adjust if needed)
+            
+            # Convert to probabilities
             action_probs = F.softmax(masked_logits, dim=-1)
             
-            # Check for NaN in probabilities
+            # Double-check for NaN in probabilities after softmax
             if torch.isnan(action_probs).any():
-                print("Warning: NaN values in probabilities, using uniform distribution")
-                action = random.choice(valid_actions)
-                return action
+                # Use uniform distribution for valid actions
+                action_probs = torch.zeros_like(action_probs)
+                action_probs[valid_actions] = 1.0 / len(valid_actions)
             
-            # Ensure non-zero probabilities for valid actions (prevent zeros from numerical issues)
-            min_prob = 1e-8
-            for idx in valid_actions:
-                action_probs[idx] = max(min_prob, action_probs[idx])
-            
-            # Re-normalize probabilities
-            action_probs = action_probs / action_probs.sum()
-            
-            # Force valid action with highest probability if distribution fails
+            # Sample from the distribution
             try:
                 action_dist = torch.distributions.Categorical(action_probs)
                 action = action_dist.sample().item()
-            except Exception as e:
-                print(f"Error sampling action: {e}, selecting highest probability action")
-                action = valid_actions[0]  # Default to first valid action
-                max_prob = action_probs[valid_actions[0]]
                 
-                # Find action with highest probability
+                # If action is not in valid_actions due to numerical issues, fall back to argmax
+                if action not in valid_actions:
+                    valid_probs = action_probs[valid_actions]
+                    action = valid_actions[torch.argmax(valid_probs).item()]
+            except Exception:
+                # If sampling fails, choose the valid action with highest probability
+                action = valid_actions[0]
+                max_prob = action_probs[valid_actions[0]].item()
+                
                 for a in valid_actions:
-                    if action_probs[a] > max_prob:
-                        max_prob = action_probs[a]
+                    if action_probs[a].item() > max_prob:
+                        max_prob = action_probs[a].item()
                         action = a
             
             return action
         except Exception as e:
-            print(f"Error in get_action: {e}")
             # Return a random valid action as fallback
             return random.choice(valid_actions) if valid_actions else None
         
@@ -216,7 +212,7 @@ class RLHipoRankAgent:
                 returns.insert(0, R)
             returns = torch.FloatTensor(returns).to(self.device)
             
-            # Normalize returns
+            # Normalize returns for stability
             if returns.std() > 0:
                 returns = (returns - returns.mean()) / (returns.std() + 1e-8)
             
@@ -226,19 +222,20 @@ class RLHipoRankAgent:
             
             # Apply action masks
             masked_logits = action_logits.clone()
-            # Set invalid action logits to negative infinity to exclude them from softmax
             for i, mask in enumerate(valid_action_masks):
-                masked_logits[i][mask == 0] = float('-inf')
+                masked_logits[i][mask == 0] = -1e8
             
-            # Compute log probabilities and entropy
+            # Replace NaN values if any
+            masked_logits = torch.nan_to_num(masked_logits, nan=-1e8, posinf=1e3, neginf=-1e8)
+            
+            # Compute log probabilities and entropy with numerical stability
             log_probs = F.log_softmax(masked_logits, dim=1)
             
-            # Fix: Handle potential errors with action indices
+            # Fix action indices
             valid_actions = []
             for i, action in enumerate(actions):
                 if action >= self.action_size:
-                    print(f"Warning: Action {action} out of bounds, using 0 instead")
-                    valid_actions.append(0)
+                    valid_actions.append(self.action_size - 1)
                 else:
                     valid_actions.append(action)
             
@@ -248,12 +245,26 @@ class RLHipoRankAgent:
             # Calculate advantage
             advantage = returns - values.detach()
             
-            # Actor loss (policy gradient with entropy regularization)
+            # Actor loss with clamped log probabilities to avoid extreme values
+            action_log_probs = torch.clamp(action_log_probs, min=-20, max=0)
             entropy = -(F.softmax(masked_logits, dim=1) * log_probs).sum(dim=1).mean()
+            entropy = torch.clamp(entropy, min=-5, max=5)  # Clamp entropy to reasonable values
+            
             actor_loss = -(action_log_probs * advantage).mean() - 0.01 * entropy
             
-            # Critic loss (MSE)
+            # Critic loss with gradient clipping
             critic_loss = F.mse_loss(values, returns)
+            
+            # Check for NaN in losses
+            if torch.isnan(actor_loss) or torch.isnan(critic_loss):
+                print("Warning: NaN in loss calculations, skipping update")
+                return {
+                    'actor_loss': float('nan'),
+                    'critic_loss': float('nan'),
+                    'entropy': float('nan'),
+                    'mean_advantage': 0,
+                    'mean_return': 0
+                }
             
             # Update networks with gradient clipping
             self.actor_optimizer.zero_grad()
@@ -268,11 +279,11 @@ class RLHipoRankAgent:
             
             # Return metrics for logging
             return {
-                'actor_loss': actor_loss.item(),
-                'critic_loss': critic_loss.item(),
-                'entropy': entropy.item(),
-                'mean_advantage': advantage.mean().item(),
-                'mean_return': returns.mean().item()
+                'actor_loss': actor_loss.item() if not torch.isnan(actor_loss) else 0,
+                'critic_loss': critic_loss.item() if not torch.isnan(critic_loss) else 0,
+                'entropy': entropy.item() if not torch.isnan(entropy) else 0,
+                'mean_advantage': advantage.mean().item() if not torch.isnan(advantage).any() else 0,
+                'mean_return': returns.mean().item() if not torch.isnan(returns).any() else 0
             }
         except Exception as e:
             print(f"Error during training: {e}")

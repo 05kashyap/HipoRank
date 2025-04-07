@@ -2,32 +2,42 @@ import numpy as np
 from .environment import global_to_local_idx
 
 def calculate_coverage(document, selected_indices, directed_sims):
-    """Simplified coverage calculation - focus on position-based importance"""
+    """Improved coverage calculation with better importance weighting"""
     if not selected_indices:
         return 0.0
     
-    # Simple position-based importance (sentences at beginning are more important)
+    # Enhanced position-based importance with section weighting
     total_score = 0.0
     total_sentences = sum(len(section.sentences) for section in document.sections)
     
+    # Weight first sentences in sections more heavily (topic sentences)
     for idx in selected_indices:
         section_idx, local_idx = global_to_local_idx(document, idx)
         if section_idx is not None and local_idx is not None:
-            # Position-based importance score
-            global_pos = idx / max(1, total_sentences - 1)
-            section_pos = section_idx / max(1, len(document.sections) - 1)
-            local_pos = local_idx / max(1, len(document.sections[section_idx].sentences) - 1)
+            # First sentences in sections get higher weight (topic sentences)
+            is_first_in_section = local_idx == 0
+            is_in_first_section = section_idx == 0
             
-            # Lower position = higher importance (1 - position)
-            importance = 0.6 * (1 - section_pos) + 0.4 * (1 - local_pos)
+            # Position-based importance 
+            position_score = 1.0 - (idx / max(1, total_sentences - 1))
+            
+            # Combine factors
+            importance = position_score * 0.5
+            
+            # Bonus for topic sentences and first section
+            if is_first_in_section:
+                importance += 0.3
+            if is_in_first_section:
+                importance += 0.2
+                
             total_score += importance
     
-    # Average the scores
-    coverage_score = total_score / len(selected_indices) if selected_indices else 0.0
+    # Average the scores and normalize to 0-1
+    coverage_score = min(1.0, total_score / len(selected_indices))
     return coverage_score
 
 def calculate_diversity(document, selected_indices, directed_sims):
-    """Simplified diversity - based on section and position distribution"""
+    """Improved diversity - focus on content and section distribution"""
     if len(selected_indices) < 2:
         return 1.0  # Perfect diversity with 0-1 sentences
     
@@ -38,71 +48,87 @@ def calculate_diversity(document, selected_indices, directed_sims):
         if section_idx is not None:
             section_counts[section_idx] = section_counts.get(section_idx, 0) + 1
     
-    # More even distribution across sections = higher diversity
-    max_section_count = max(section_counts.values()) if section_counts else 1
-    section_diversity = 1.0 - (max_section_count / len(selected_indices))
+    # Calculate section diversity (more even distribution = better)
+    if section_counts:
+        num_sections_used = len(section_counts)
+        section_diversity = num_sections_used / min(len(document.sections), len(selected_indices))
+    else:
+        section_diversity = 0.0
     
-    # Position diversity - sentences from different positions are more diverse
+    # Calculate position diversity (sentences from different parts of document)
     positions = []
     total_sentences = sum(len(section.sentences) for section in document.sections)
     for idx in selected_indices:
         relative_pos = idx / max(1, total_sentences - 1)
         positions.append(relative_pos)
     
-    # Divide position range (0-1) into 4 quarters and count sentences in each
-    quarter_counts = [0, 0, 0, 0]
-    for pos in positions:
-        quarter = min(3, int(pos * 4))
-        quarter_counts[quarter] += 1
-    
-    # More even distribution across quarters = higher diversity
-    max_quarter_count = max(quarter_counts)
-    position_diversity = 1.0 - (max_quarter_count / len(selected_indices))
+    # Calculate variance of positions (higher variance = better diversity)
+    if positions:
+        pos_variance = np.var(positions) * 4  # Scale up variance as it's often small
+        position_diversity = min(1.0, pos_variance)  # Cap at 1.0
+    else:
+        position_diversity = 0.0
     
     # Combine diversities
-    diversity_score = 0.5 * section_diversity + 0.5 * position_diversity
+    diversity_score = 0.6 * section_diversity + 0.4 * position_diversity
     return diversity_score
 
 def calculate_coherence(document, selected_indices, directed_sims):
-    """Simplified coherence - focus on sequential ordering and section consistency"""
+    """Improved coherence - focus on logic flow and section ordering"""
     if len(selected_indices) < 2:
         return 1.0  # Perfect coherence with 0-1 sentences
     
-    # Sort selected indices to get sentences in order
+    # Sort selected indices to get chronological order
     ordered_indices = sorted(selected_indices)
     
-    # Check for section consistency and sequence gaps
-    coherence_score = 0.0
+    # Initialize coherence components
+    section_flow_score = 0.0
+    sequential_score = 0.0
+    
     prev_section_idx = None
     prev_local_idx = None
+    
+    # Track section transitions
+    section_jumps = 0
+    backwards_jumps = 0
     
     for idx in ordered_indices:
         section_idx, local_idx = global_to_local_idx(document, idx)
         
         if prev_section_idx is not None:
-            # Reward keeping same section (section continuity)
-            if section_idx == prev_section_idx:
-                coherence_score += 0.5
-                
-                # Additional reward for sequential sentences within section
-                if local_idx == prev_local_idx + 1:
-                    coherence_score += 0.5
+            # Score section transitions
+            section_diff = section_idx - prev_section_idx
             
-            # Smaller reward for moving to next section
-            elif section_idx == prev_section_idx + 1:
-                coherence_score += 0.3
+            if section_diff == 0:  # Same section
+                section_flow_score += 1.0
+                # Check if sentences are sequential
+                if local_idx == prev_local_idx + 1:
+                    sequential_score += 1.0
+            elif section_diff == 1:  # Next section
+                section_flow_score += 0.7
+            elif section_diff > 1:  # Forward jump
+                section_flow_score += 0.4
+                section_jumps += 1
+            else:  # Backward jump (negative coherence)
+                section_flow_score += 0.1
+                backwards_jumps += 1
         
         prev_section_idx = section_idx
         prev_local_idx = local_idx
     
-    # Normalize by maximum possible score
-    max_score = (len(ordered_indices) - 1) * 1.0  # Max if all sentences were sequential in same section
-    coherence_score = coherence_score / max_score if max_score > 0 else 1.0
+    # Normalize scores
+    section_flow = section_flow_score / (len(ordered_indices) - 1) if len(ordered_indices) > 1 else 1.0
+    sequential_bonus = sequential_score / (len(ordered_indices) - 1) if len(ordered_indices) > 1 else 1.0
     
-    return coherence_score
+    # Penalties for excessive jumps
+    jump_penalty = min(1.0, (section_jumps + backwards_jumps * 2) / len(ordered_indices)) if ordered_indices else 0
+    
+    # Calculate final coherence score
+    coherence_score = (0.5 * section_flow + 0.5 * sequential_bonus) * (1.0 - 0.3 * jump_penalty)
+    return max(0.1, coherence_score)  # Ensure minimum coherence
 
 def calculate_reward(document, selected_indices, directed_sims):
-    """Calculate combined reward using simplified metrics"""
+    """Calculate improved reward with balanced components and better length rewards"""
     if not selected_indices:
         return 0.0
     
@@ -111,7 +137,7 @@ def calculate_reward(document, selected_indices, directed_sims):
     diversity = calculate_diversity(document, selected_indices, directed_sims)
     coherence = calculate_coherence(document, selected_indices, directed_sims)
     
-    # Length reward - encourage using most of the available length but penalize exceeding
+    # Calculate length reward (encourage suitable length summaries)
     total_words = 0
     for idx in selected_indices:
         section_idx, local_idx = global_to_local_idx(document, idx)
@@ -119,15 +145,35 @@ def calculate_reward(document, selected_indices, directed_sims):
             sentence = document.sections[section_idx].sentences[local_idx]
             total_words += len(sentence.split())
     
-    # Length reward that peaks at the target word count
+    # Improved length reward curve - peaks at target, falls off on both sides
     target_words = 200
-    length_ratio = total_words / target_words
-    length_reward = max(0.0, 1.0 - abs(1.0 - length_ratio))
+    min_words = 100  # Minimum acceptable summary
+    
+    # No reward until minimum word count
+    if total_words < min_words:
+        length_factor = total_words / min_words
+    # Full reward at target word count
+    elif total_words <= target_words:
+        length_factor = 0.5 + 0.5 * (total_words / target_words)
+    # Gradually decreasing reward past target (but not too harsh)
+    else:
+        over_ratio = total_words / target_words
+        length_factor = max(0.1, 1.0 - 0.2 * (over_ratio - 1.0))
+    
+    # Sentence count factor - encourage using appropriate number of sentences
+    ideal_sentences = 8  # Typical good summary length
+    sentence_count_factor = 1.0 - 0.5 * abs(len(selected_indices) - ideal_sentences) / ideal_sentences
+    sentence_count_factor = max(0.5, sentence_count_factor)  # Don't penalize too heavily
     
     # Combine scores with weights
     reward = (0.35 * coverage + 
               0.25 * diversity + 
               0.20 * coherence + 
-              0.20 * length_reward)
+              0.10 * length_factor +
+              0.10 * sentence_count_factor)
     
-    return reward
+    # Add a small random component for exploration (breaks plateaus)
+    exploration_noise = np.random.normal(0, 0.02)  # Small Gaussian noise
+    reward = max(0.1, min(1.0, reward + exploration_noise))  # Keep in reasonable range
+    
+    return reward * 5.0  # Scale up rewards to make improvements more noticeable

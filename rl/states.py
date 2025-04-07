@@ -18,22 +18,23 @@ def create_summary_mask(num_sentences, selected_indices):
     return mask
 
 def create_state(document, embeddings, similarities, current_summary_indices=None):
-    """Create simplified state representation avoiding complex HipoRank structures"""
-    # Count total sentences in the document (simplified)
-    total_sentences = 0
-    for section in document.sections:
-        total_sentences += len(section.sentences)
+    """Create simplified state representation with consistent dimensions"""
+    # Use a fixed maximum number of sentences to ensure consistent state size
+    max_sentences = 23  # Fixed value to ensure consistency
     
-    # Limit to a reasonable size
-    max_sentences = min(100, total_sentences)
+    if current_summary_indices is None:
+        current_summary_indices = []
     
     # Basic features about the document
     doc_features = np.zeros(5)
+    
+    # Count total sentences in the document
+    total_sentences = sum(len(section.sentences) for section in document.sections)
     doc_features[0] = len(document.sections)  # Number of sections
     doc_features[1] = total_sentences  # Total sentences
     doc_features[2] = total_sentences / max(1, len(document.sections))  # Avg sentences per section
     doc_features[3] = 0.5  # Fixed value to replace complex similarity calcs
-    doc_features[4] = 0.5  # Fixed value to replace complex calcs
+    doc_features[4] = len(current_summary_indices) / max(1, total_sentences)  # Summary progress
     
     # Position features - simple array of sentence positions (0-1 range)
     position_features = np.zeros(max_sentences)
@@ -42,11 +43,9 @@ def create_state(document, embeddings, similarities, current_summary_indices=Non
     
     # Create summary mask with fixed size (binary indicators of selected sentences)
     summary_mask = np.zeros(max_sentences)
-    
-    if current_summary_indices:
-        for idx in current_summary_indices:
-            if 0 <= idx < max_sentences:
-                summary_mask[idx] = 1
+    for idx in current_summary_indices:
+        if 0 <= idx < max_sentences:
+            summary_mask[idx] = 1
     
     # Word count features (approximate sentence lengths)
     word_count_features = np.zeros(max_sentences)
@@ -60,10 +59,11 @@ def create_state(document, embeddings, similarities, current_summary_indices=Non
     
     # Combine features - ensure all parts have consistent dimensions
     state = np.concatenate([
-        doc_features,  # Basic document features
-        position_features,  # Position information
-        word_count_features,  # Sentence length information
-        summary_mask  # Which sentences are already selected
+        doc_features,  # 5 features
+        position_features,  # max_sentences features
+        word_count_features,  # max_sentences features
+        summary_mask  # max_sentences features
     ])
     
+    # Final state should have size: 5 + 3*max_sentences = 5 + 3*23 = 74
     return state

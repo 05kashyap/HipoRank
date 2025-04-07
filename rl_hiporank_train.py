@@ -52,32 +52,24 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
     print(f"Filtered documents: {len(filtered_documents)} out of {len(documents)} (kept documents with ≤ 500 tokens)")
     documents = filtered_documents
     
-    # Initialize agent with appropriate state size
-    # Get a sample document to determine dimensions
-    sample_doc = documents[0]
+    # Initialize agent with fixed state size based on our state representation in states.py
+    # The state size is fixed at 5 + 3*23 = 74 (see create_state function)
+    state_size = 5 + (3 * 23)  # Fixed size regardless of document
+    action_size = 100  # Fixed action space size
     
-    # Count total sentences in the document (across all sections)
-    total_sentences = 0
-    for section in sample_doc.sections:
-        total_sentences += len(section.sentences)
-    
-    # Calculate simplified state size (see new create_state function)
-    max_sentences = min(100, total_sentences)
-    
-    # Size = [doc features (5) + position features (max_sentences) + 
-    #         word count features (max_sentences) + summary mask (max_sentences)]
-    state_size = 5 + (3 * max_sentences)
-    
-    # Set a reasonable action space size based on observed documents
-    action_size = 100  # This should accommodate most documents
-    print(f"Document has {total_sentences} total sentences across {len(sample_doc.sections)} sections")
     print(f"Initializing agent with state_size={state_size}, action_size={action_size}")
     
-    agent = RLHipoRankAgent(state_size=state_size, action_size=action_size)
+    agent = RLHipoRankAgent(state_size=state_size, action_size=action_size, 
+                           learning_rate=0.0005)  # Lower learning rate for stability
+    
     # Training metrics
     episode_rewards = []
     best_avg_reward = float('-inf')
     training_stats = {'actor_loss': [], 'critic_loss': [], 'entropy': [], 'mean_reward': []}
+    
+    # Add early stopping to prevent wasting time on non-improving runs
+    no_improvement_count = 0
+    best_reward_window = float('-inf')
     
     # Training loop
     for episode in tqdm(range(num_episodes), desc="Training Episodes"):
@@ -95,7 +87,6 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
                 directed_sims = direction.update_directions(similarities)
                 valid_doc = True
             except Exception as e:
-                print(f"Error processing document in episode {episode}, retrying... ({e})")
                 retries += 1
         
         if not valid_doc:
@@ -123,19 +114,18 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
             if not valid_actions:
                 break
             
-            # Create valid action mask - FIX: Ensure the mask is the correct size
+            # Create valid action mask - ensure the mask is the correct size
             valid_mask = torch.zeros(action_size)
-            # Ensure all indices are within bounds
             valid_actions_in_range = [a for a in valid_actions if a < action_size]
             if len(valid_actions_in_range) == 0:
-                print(f"Warning: No valid actions within range. Original actions: {valid_actions}")
                 break
             
             valid_mask[valid_actions_in_range] = 1.0
             valid_action_masks.append(valid_mask.tolist())
                 
-            # Get action from agent with epsilon-greedy exploration
-            if random.random() < max(0.1, 1.0 - episode / (num_episodes * 0.75)):  # Decay epsilon
+            # Get action from agent with decreasing epsilon for exploration
+            epsilon = max(0.05, 0.5 - episode / (num_episodes * 0.3))  # Faster decay
+            if random.random() < epsilon:
                 action = random.choice(valid_actions_in_range)
             else:
                 action = agent.get_action(state, valid_actions_in_range)
@@ -160,7 +150,7 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
         if len(states) < 2:
             continue
             
-        # Update agent after episode
+        # Update agent after episode with gradient clipping
         update_stats = agent.train(states, actions, rewards, valid_action_masks)
         
         # Track progress
@@ -168,7 +158,8 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
         
         # Log progress
         if (episode + 1) % log_interval == 0:
-            avg_reward = np.mean(episode_rewards[-log_interval:])
+            window_size = min(log_interval, len(episode_rewards))
+            avg_reward = np.mean(episode_rewards[-window_size:])
             
             # Update learning rate schedulers based on performance
             agent.update_lr_schedulers(avg_reward)
@@ -189,6 +180,21 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
                 best_avg_reward = avg_reward
                 agent.save_model(checkpoint_path / "best_model.pt")
                 print(f"New best model saved with avg reward: {best_avg_reward:.4f}")
+                no_improvement_count = 0  # Reset counter
+            else:
+                no_improvement_count += 1
+            
+            # Early stopping check (after enough episodes)
+            if episode > 1000 and no_improvement_count >= 10:
+                print(f"No improvement for {no_improvement_count * log_interval} episodes. Early stopping.")
+                break
+                
+            # Check for reward window improvement (for long-term trends)
+            if episode > 500:  # Only after enough episodes
+                window_reward = np.mean(episode_rewards[-500:])
+                if window_reward > best_reward_window:
+                    best_reward_window = window_reward
+                    agent.save_model(checkpoint_path / "trend_model.pt")
     
     # Save final model
     agent.save_model(checkpoint_path / "final_model.pt")
