@@ -167,12 +167,22 @@ class HipoRankEnvironment:
                 semantic_score = self.transformer_encoder.calculate_summary_quality(
                     self.all_sentences, current_summary_sentences
                 )
-                transformer_data = {
-                    'importance_scores': self.transformer_importance_scores,
-                    'semantic_score': semantic_score
-                }
+                
+                # Create transformer_data dictionary with proper checks
+                transformer_data = {}
+                if self.transformer_importance_scores is not None and len(self.transformer_importance_scores) > 0:
+                    transformer_data['importance_scores'] = self.transformer_importance_scores
+                
+                if semantic_score is not None:
+                    transformer_data['semantic_score'] = semantic_score
+                    
+                # If dictionary is empty, set to None
+                if not transformer_data:
+                    transformer_data = None
+                    
             except Exception as e:
                 print(f"Error calculating transformer reward: {e}")
+                transformer_data = None
         
         # Calculate reward with transformer guidance if available
         from rl.rewards import calculate_reward

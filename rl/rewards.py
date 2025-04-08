@@ -129,11 +129,11 @@ def calculate_coherence(document, selected_indices, directed_sims):
 
 def transformer_coverage(document, selected_indices, transformer_importance_scores):
     """Calculate coverage using transformer-based importance scores"""
-    if not selected_indices or not transformer_importance_scores:
+    if not selected_indices or transformer_importance_scores is None or len(transformer_importance_scores) == 0:
         return 0.0
         
     # Get total importance of all sentences
-    total_importance = sum(transformer_importance_scores)
+    total_importance = float(np.sum(transformer_importance_scores))
     if total_importance == 0:
         return 0.0
         
@@ -141,7 +141,7 @@ def transformer_coverage(document, selected_indices, transformer_importance_scor
     selected_importance = 0.0
     for idx in selected_indices:
         if 0 <= idx < len(transformer_importance_scores):
-            selected_importance += transformer_importance_scores[idx]
+            selected_importance += float(transformer_importance_scores[idx])
     
     # Calculate coverage as proportion of total importance captured
     coverage_score = min(1.0, selected_importance / total_importance)
@@ -166,7 +166,7 @@ def calculate_reward(document, selected_indices, directed_sims, transformer_data
     semantic_quality = 0.0
     
     # Add transformer-based rewards if available
-    if transformer_data:
+    if transformer_data is not None:
         # Extract transformer data
         importance_scores = transformer_data.get('importance_scores')
         semantic_score = transformer_data.get('semantic_score')

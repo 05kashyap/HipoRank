@@ -62,10 +62,14 @@ class TransformerSentenceEncoder:
     
     def get_sentence_importance(self, sentences: List[str]) -> np.ndarray:
         """Calculate importance scores for sentences based on centrality"""
+        # Handle empty input
+        if not sentences:
+            return np.array([])
+        
         # Get similarities
         similarities = self.calculate_sentence_similarities(sentences)
         
-        if len(similarities) == 0:
+        if similarities.shape[0] == 0:
             return np.array([])
         
         # Convert to numpy for easier manipulation
@@ -75,8 +79,11 @@ class TransformerSentenceEncoder:
         centrality = np.mean(sim_matrix, axis=1)
         
         # Normalize to [0, 1] range
-        if len(centrality) > 0 and np.max(centrality) > np.min(centrality):
-            centrality = (centrality - np.min(centrality)) / (np.max(centrality) - np.min(centrality))
+        min_val = np.min(centrality) if centrality.size > 0 else 0
+        max_val = np.max(centrality) if centrality.size > 0 else 1
+        
+        if centrality.size > 0 and max_val > min_val:
+            centrality = (centrality - min_val) / (max_val - min_val)
             
         return centrality
 
