@@ -185,7 +185,7 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
                 no_improvement_count += 1
             
             # Early stopping check (after enough episodes)
-            if episode > 1000 and no_improvement_count >= 10:
+            if episode > 10000 and no_improvement_count >= 1000:
                 print(f"No improvement for {no_improvement_count * log_interval} episodes. Early stopping.")
                 break
                 
