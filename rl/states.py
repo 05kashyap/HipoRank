@@ -17,8 +17,11 @@ def create_summary_mask(num_sentences, selected_indices):
             mask[idx] = 1
     return mask
 
-def create_state(document, embeddings, similarities, current_summary_indices=None):
-    """Create simplified state representation with consistent dimensions"""
+# Store transformer features globally to avoid recalculation
+_transformer_features_cache = {}
+
+def create_state(document, embeddings, similarities, current_summary_indices=None, transformer_features=None):
+    """Create enriched state representation with transformer-based contextual information"""
     # Use a fixed maximum number of sentences to ensure consistent state size
     max_sentences = 23  # Fixed value to ensure consistency
     
@@ -36,10 +39,45 @@ def create_state(document, embeddings, similarities, current_summary_indices=Non
     doc_features[3] = 0.5  # Fixed value to replace complex similarity calcs
     doc_features[4] = len(current_summary_indices) / max(1, total_sentences)  # Summary progress
     
-    # Position features - simple array of sentence positions (0-1 range)
+    # Initialize enhanced features with zeros
     position_features = np.zeros(max_sentences)
-    for i in range(min(max_sentences, total_sentences)):
-        position_features[i] = i / max(1, total_sentences - 1)
+    importance_features = np.zeros(max_sentences)  # New transformer-based importance
+    contextual_features = np.zeros(max_sentences)  # New contextual features
+    
+    # Incorporate transformer features if available
+    if transformer_features is not None:
+        # Get importance scores from transformer
+        importance_scores = transformer_features.get("importance_scores", [])
+        position_scores = transformer_features.get("position_scores", [])
+        
+        # Fill feature arrays with available transformer data
+        for i in range(min(max_sentences, len(importance_scores))):
+            importance_features[i] = importance_scores[i]
+        
+        for i in range(min(max_sentences, len(position_scores))):
+            position_features[i] = position_scores[i]
+            
+        # Add contextual features - how sentences relate to each other
+        if "sentence_embeddings" in transformer_features and len(transformer_features["sentence_embeddings"]) > 0:
+            embeddings = transformer_features["sentence_embeddings"]
+            # Calculate average similarity to other sentences as a contextual feature
+            for i in range(min(max_sentences, len(embeddings))):
+                if len(embeddings) > 1:
+                    # Average similarity to all other sentences
+                    sims = []
+                    for j in range(len(embeddings)):
+                        if i != j:
+                            sim = np.dot(embeddings[i], embeddings[j]) / (
+                                max(np.linalg.norm(embeddings[i]) * np.linalg.norm(embeddings[j]), 1e-8)
+                            )
+                            sims.append(sim)
+                    contextual_features[i] = np.mean(sims) if sims else 0.5
+                else:
+                    contextual_features[i] = 0.5
+    else:
+        # Default position features if no transformer data
+        for i in range(min(max_sentences, total_sentences)):
+            position_features[i] = i / max(1, total_sentences - 1)
     
     # Create summary mask with fixed size (binary indicators of selected sentences)
     summary_mask = np.zeros(max_sentences)
@@ -61,9 +99,11 @@ def create_state(document, embeddings, similarities, current_summary_indices=Non
     state = np.concatenate([
         doc_features,  # 5 features
         position_features,  # max_sentences features
+        importance_features,  # max_sentences features (new)
+        contextual_features,  # max_sentences features (new)
         word_count_features,  # max_sentences features
         summary_mask  # max_sentences features
     ])
     
-    # Final state should have size: 5 + 3*max_sentences = 5 + 3*23 = 74
+    # Final state size: 5 + 4*max_sentences = 5 + 4*23 = 97
     return state

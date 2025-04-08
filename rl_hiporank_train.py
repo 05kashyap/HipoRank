@@ -8,9 +8,10 @@ import json
 from tqdm import tqdm
 
 from rl.agents import RLHipoRankAgent
-from rl.environment import HipoRankEnvironment, get_valid_actions, global_to_local_idx
+from rl.environment import HipoRankEnvironment, get_valid_actions, global_to_local_idx, get_all_sentences
 from rl.states import create_state
 from rl.rewards import calculate_reward
+from rl.transformer_utils import TransformerSentenceEncoder  # Import transformer utils
 
 from hipo_rank.dataset_iterators.pubmed import PubmedDataset
 from hipo_rank.dataset_iterators.billsum import BillsumDataset
@@ -30,8 +31,9 @@ def set_random_seed(seed):
 
 def train_rl_hiporank(documents, embedder, similarity, direction, scorer, 
                       num_episodes=1000, max_summary_sentences=10, max_words=200,
-                      checkpoint_dir="checkpoints", log_interval=50):
-    """Train the RL-HipoRank model with simplified approach"""
+                      checkpoint_dir="checkpoints", log_interval=50,
+                      transformer_model="distilbert-base-uncased"):
+    """Train the RL-HipoRank model with transformer guidance"""
     # Create checkpoint directory
     checkpoint_path = Path(checkpoint_dir)
     checkpoint_path.mkdir(exist_ok=True, parents=True)
@@ -52,15 +54,30 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
     print(f"Filtered documents: {len(filtered_documents)} out of {len(documents)} (kept documents with ≤ 500 tokens)")
     documents = filtered_documents
     
-    # Initialize agent with fixed state size based on our state representation in states.py
-    # The state size is fixed at 5 + 3*23 = 74 (see create_state function)
-    state_size = 5 + (3 * 23)  # Fixed size regardless of document
+    # Initialize transformer encoder for enhanced representations
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    transformer_encoder = None
+    
+    try:
+        print(f"Initializing transformer encoder with model: {transformer_model}")
+        transformer_encoder = TransformerSentenceEncoder(
+            model_name=transformer_model,
+            max_length=512,
+            device=device
+        )
+        print("Transformer encoder initialized successfully")
+    except Exception as e:
+        print(f"Failed to initialize transformer encoder: {e}. Continuing without transformer guidance.")
+    
+    # Initialize agent with updated state size based on our enhanced state representation in states.py
+    # The state size is now fixed at 5 + 4*23 = 97 (see updated create_state function)
+    state_size = 5 + (4 * 23)  # Updated fixed size with transformer features
     action_size = 100  # Fixed action space size
     
     print(f"Initializing agent with state_size={state_size}, action_size={action_size}")
     
     agent = RLHipoRankAgent(state_size=state_size, action_size=action_size, 
-                           learning_rate=0.0005)  # Lower learning rate for stability
+                          learning_rate=0.0005)  # Lower learning rate for stability
     
     # Training metrics
     episode_rewards = []
@@ -88,15 +105,19 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
                 valid_doc = True
             except Exception as e:
                 retries += 1
+                print(f"Error processing document: {e}. Retrying...")
         
         if not valid_doc:
             print(f"Skipping episode {episode} due to document processing errors")
             continue
         
-        # Create environment
+        # Create environment with transformer encoder
         try:
-            env = HipoRankEnvironment(doc, embeddings, similarities, directed_sims, 
-                                    max_summary_sentences, max_words)
+            env = HipoRankEnvironment(
+                doc, embeddings, similarities, directed_sims, 
+                max_summary_sentences, max_words,
+                transformer_encoder=transformer_encoder
+            )
         except Exception as e:
             print(f"Error creating environment in episode {episode}: {e}")
             continue
@@ -104,6 +125,8 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
         # Initialize episode
         state = env.reset()
         states, actions, rewards, valid_action_masks = [], [], [], []
+        next_states = []  # Store next states for off-policy learning
+        dones = []  # Store done flags
         episode_reward = 0
         done = False
         
@@ -123,35 +146,55 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
             valid_mask[valid_actions_in_range] = 1.0
             valid_action_masks.append(valid_mask.tolist())
                 
-            # Get action from agent with decreasing epsilon for exploration
+            # Get transformer importance scores if available
+            transformer_scores = env.get_transformer_scores() if hasattr(env, "get_transformer_scores") else None
+                
+            # Get action from agent with decreasing epsilon for exploration and transformer guidance
             epsilon = max(0.05, 0.5 - episode / (num_episodes * 0.3))  # Faster decay
             if random.random() < epsilon:
+                # Exploration: randomly select from valid actions
                 action = random.choice(valid_actions_in_range)
             else:
-                action = agent.get_action(state, valid_actions_in_range)
+                # Exploitation: use agent's policy with transformer guidance
+                action = agent.get_action(state, valid_actions_in_range, transformer_scores)
                 
             if action is None:
                 break
                 
             actions.append(action)
+            states.append(state)  # Store state before taking action
             
             # Take step in environment
             next_state, reward, done = env.step(action)
             
             # Store experience
-            states.append(state)
             rewards.append(reward)
+            next_states.append(next_state)
+            dones.append(done)
             episode_reward += reward
+            
+            # Store experience in replay buffer for off-policy learning
+            if hasattr(agent, "store_experience"):
+                agent.store_experience(state, action, reward, next_state, done, valid_mask.tolist())
             
             # Move to next state
             state = next_state
-            
+        
         # Skip update if episode was too short
         if len(states) < 2:
             continue
             
         # Update agent after episode with gradient clipping
         update_stats = agent.train(states, actions, rewards, valid_action_masks)
+        
+        # Optionally perform additional updates from replay buffer
+        if hasattr(agent, "update_from_replay") and episode > 100 and episode % 5 == 0:
+            replay_stats = agent.update_from_replay()
+            if replay_stats:
+                # Incorporate replay stats into update_stats for logging
+                for key, value in replay_stats.items():
+                    if key in update_stats:
+                        update_stats[key] = (update_stats[key] + value) / 2
         
         # Track progress
         episode_rewards.append(episode_reward)
@@ -205,8 +248,9 @@ def train_rl_hiporank(documents, embedder, similarity, direction, scorer,
     
     return agent, episode_rewards
 
-def evaluate_rl_agent(agent, documents, embedder, similarity, direction, scorer, num_samples=100, max_words=200):
-    """Evaluate the trained RL agent on documents"""
+def evaluate_rl_agent(agent, documents, embedder, similarity, direction, scorer,
+                     num_samples=100, max_words=200, transformer_model="distilbert-base-uncased"):
+    """Evaluate the trained RL agent on documents with transformer enhancement"""
     # Filter documents that are too long for BERT
     filtered_documents = [doc for doc in documents if sum(len(sent.split()) for sect in doc.sections for sent in sect.sentences) <= 500]
     if not filtered_documents:
@@ -215,6 +259,19 @@ def evaluate_rl_agent(agent, documents, embedder, similarity, direction, scorer,
         
     total_documents = min(len(filtered_documents), num_samples)
     test_documents = random.sample(filtered_documents, total_documents)
+    
+    # Initialize transformer encoder if possible
+    transformer_encoder = None
+    try:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        transformer_encoder = TransformerSentenceEncoder(
+            model_name=transformer_model,
+            max_length=512,
+            device=device
+        )
+        print("Using transformer guidance for evaluation")
+    except Exception as e:
+        print(f"Failed to initialize transformer for evaluation: {e}")
     
     results = []
     
@@ -225,8 +282,12 @@ def evaluate_rl_agent(agent, documents, embedder, similarity, direction, scorer,
             similarities = similarity.get_similarities(embeddings)
             directed_sims = direction.update_directions(similarities)
             
-            # Create environment
-            env = HipoRankEnvironment(doc, embeddings, similarities, directed_sims, max_words=max_words)
+            # Create environment with transformer integration
+            env = HipoRankEnvironment(
+                doc, embeddings, similarities, directed_sims, 
+                max_words=max_words,
+                transformer_encoder=transformer_encoder
+            )
             
             # Generate summary
             state = env.reset()
@@ -238,21 +299,47 @@ def evaluate_rl_agent(agent, documents, embedder, similarity, direction, scorer,
                 valid_actions = [a for a in valid_actions if a < agent.action_size]
                 if not valid_actions:
                     break
-                    
-                action = agent.get_action(state, valid_actions)
+                
+                # Get transformer scores for hybrid action selection
+                transformer_scores = env.get_transformer_scores() if hasattr(env, "get_transformer_scores") else None
+                
+                # Use hybrid action selection for better summaries
+                action = agent.get_action(state, valid_actions, transformer_scores)
                 state, reward, done = env.step(action)
             
-            # Format summary
+            # Format summary with transformer-based quality scores
             summary = []
+            current_summary_sentences = []
+            
             for idx in env.current_summary:
                 section_idx, local_idx = global_to_local_idx(doc, idx)
                 if section_idx is not None and local_idx is not None:
                     sentence = doc.sections[section_idx].sentences[local_idx]
-                    summary.append([sentence, 1.0])  # Format: [sentence, score]
+                    current_summary_sentences.append(sentence)
+                    
+                    # Get sentence importance from transformer if available
+                    importance_score = 1.0  # Default score
+                    if transformer_encoder is not None and hasattr(env, "transformer_importance_scores"):
+                        if env.transformer_importance_scores is not None and idx < len(env.transformer_importance_scores):
+                            importance_score = float(env.transformer_importance_scores[idx])
+                    
+                    summary.append([sentence, importance_score])
+            
+            # Add semantic quality score if transformer is available
+            semantic_quality = 0.0
+            if transformer_encoder is not None and current_summary_sentences:
+                try:
+                    all_sentences = get_all_sentences(doc)
+                    semantic_quality = transformer_encoder.calculate_summary_quality(
+                        all_sentences, current_summary_sentences
+                    )
+                except Exception as e:
+                    print(f"Error calculating semantic quality: {e}")
             
             results.append({
                 "document_id": getattr(doc, "id", "unknown"),
-                "summary": summary
+                "summary": summary,
+                "semantic_quality": semantic_quality
             })
         except Exception as e:
             print(f"Error evaluating document: {e}")
@@ -281,6 +368,10 @@ def main():
                         help="Maximum number of sentences in summary")
     parser.add_argument("--log-interval", type=int, default=50,
                         help="Interval for logging training progress")
+    parser.add_argument("--transformer-model", type=str, default="distilbert-base-uncased",
+                        help="Transformer model to use for sentence encoding")
+    parser.add_argument("--no-transformer", action="store_true",
+                        help="Disable transformer guidance (use base RL only)")
     
     args = parser.parse_args()
     
@@ -290,6 +381,9 @@ def main():
     # Create output directory
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
+    
+    # Set transformer model or None if disabled
+    transformer_model = None if args.no_transformer else args.transformer_model
     
     try:
         # Setup based on dataset choice
@@ -323,8 +417,8 @@ def main():
         documents = list(dataset)
         print(f"Total documents: {len(documents)}")
         
-        # Train RL-HipoRank agent
-        print("Starting RL-HipoRank training...")
+        # Train RL-HipoRank agent with transformer enhancements
+        print("Starting RL-HipoRank training with transformer guidance...")
         agent, rewards = train_rl_hiporank(
             documents, 
             embedder, 
@@ -335,7 +429,8 @@ def main():
             max_summary_sentences=args.max_sentences,
             max_words=args.max_words,
             checkpoint_dir=args.checkpoint_dir,
-            log_interval=args.log_interval
+            log_interval=args.log_interval,
+            transformer_model=transformer_model
         )
         
         # Save training rewards with more detailed metrics
@@ -358,7 +453,7 @@ def main():
             plt.plot(episode_data['moving_avg_100'], label='100-Episode Moving Avg')
             plt.xlabel('Episode')
             plt.ylabel('Reward')
-            plt.title('RL-HipoRank Training Progress')
+            plt.title('Transformer-Enhanced RL-HipoRank Training Progress')
             plt.legend()
             plt.savefig(output_dir / "training_curve.png")
         except ImportError:
@@ -366,7 +461,7 @@ def main():
         
         # Evaluate if requested
         if args.eval:
-            print("Evaluating trained model...")
+            print("Evaluating trained model with transformer guidance...")
             results = evaluate_rl_agent(
                 agent, 
                 documents, 
@@ -375,7 +470,8 @@ def main():
                 direction, 
                 scorer, 
                 num_samples=100,
-                max_words=args.max_words
+                max_words=args.max_words,
+                transformer_model=transformer_model
             )
             
             # Save evaluation results
@@ -383,6 +479,22 @@ def main():
                 json.dump(results, f, indent=2)
             
             print(f"Evaluation results saved to {output_dir / 'rl_summaries.json'}")
+            
+            # Generate evaluation metrics summary if transformer was used
+            if transformer_model is not None:
+                semantic_qualities = [result["semantic_quality"] for result in results if "semantic_quality" in result]
+                if semantic_qualities:
+                    metrics_summary = {
+                        "avg_semantic_quality": sum(semantic_qualities) / len(semantic_qualities),
+                        "min_semantic_quality": min(semantic_qualities),
+                        "max_semantic_quality": max(semantic_qualities),
+                        "num_summaries": len(results)
+                    }
+                    
+                    with open(output_dir / "evaluation_metrics.json", "w") as f:
+                        json.dump(metrics_summary, f, indent=2)
+                    
+                    print(f"Average semantic quality: {metrics_summary['avg_semantic_quality']:.4f}")
     
     except Exception as e:
         print(f"Error in main program: {e}")

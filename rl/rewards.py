@@ -127,15 +127,57 @@ def calculate_coherence(document, selected_indices, directed_sims):
     coherence_score = (0.5 * section_flow + 0.5 * sequential_bonus) * (1.0 - 0.3 * jump_penalty)
     return max(0.1, coherence_score)  # Ensure minimum coherence
 
-def calculate_reward(document, selected_indices, directed_sims):
-    """Calculate improved reward with balanced components and better length rewards"""
+def transformer_coverage(document, selected_indices, transformer_importance_scores):
+    """Calculate coverage using transformer-based importance scores"""
+    if not selected_indices or not transformer_importance_scores:
+        return 0.0
+        
+    # Get total importance of all sentences
+    total_importance = sum(transformer_importance_scores)
+    if total_importance == 0:
+        return 0.0
+        
+    # Sum importance of selected sentences
+    selected_importance = 0.0
+    for idx in selected_indices:
+        if 0 <= idx < len(transformer_importance_scores):
+            selected_importance += transformer_importance_scores[idx]
+    
+    # Calculate coverage as proportion of total importance captured
+    coverage_score = min(1.0, selected_importance / total_importance)
+    return coverage_score
+
+def transformer_semantic_quality(document, selected_indices, transformer_semantic_score):
+    """Use transformer semantic similarity between document and summary as quality score"""
+    return transformer_semantic_score if transformer_semantic_score is not None else 0.0
+
+def calculate_reward(document, selected_indices, directed_sims, transformer_data=None):
+    """Calculate improved reward with transformer-based components"""
     if not selected_indices:
         return 0.0
     
-    # Calculate component rewards
+    # Calculate base component rewards
     coverage = calculate_coverage(document, selected_indices, directed_sims)
     diversity = calculate_diversity(document, selected_indices, directed_sims)
     coherence = calculate_coherence(document, selected_indices, directed_sims)
+    
+    # Initialize transformer-based components
+    transformer_cov = 0.0
+    semantic_quality = 0.0
+    
+    # Add transformer-based rewards if available
+    if transformer_data:
+        # Extract transformer data
+        importance_scores = transformer_data.get('importance_scores')
+        semantic_score = transformer_data.get('semantic_score')
+        
+        # Calculate transformer-based coverage using importance scores
+        if importance_scores is not None:
+            transformer_cov = transformer_coverage(document, selected_indices, importance_scores)
+            
+        # Use semantic quality score if available
+        if semantic_score is not None:
+            semantic_quality = transformer_semantic_quality(document, selected_indices, semantic_score)
     
     # Calculate length reward (encourage suitable length summaries)
     total_words = 0
@@ -165,12 +207,21 @@ def calculate_reward(document, selected_indices, directed_sims):
     sentence_count_factor = 1.0 - 0.5 * abs(len(selected_indices) - ideal_sentences) / ideal_sentences
     sentence_count_factor = max(0.5, sentence_count_factor)  # Don't penalize too heavily
     
-    # Combine scores with weights
-    reward = (0.35 * coverage + 
-              0.25 * diversity + 
-              0.20 * coherence + 
-              0.10 * length_factor +
-              0.10 * sentence_count_factor)
+    # Combine scores with weights - incorporate transformer components if available
+    if transformer_data:
+        reward = (0.25 * coverage + 
+                  0.20 * diversity + 
+                  0.15 * coherence + 
+                  0.15 * transformer_cov +
+                  0.15 * semantic_quality +
+                  0.05 * length_factor +
+                  0.05 * sentence_count_factor)
+    else:
+        reward = (0.35 * coverage + 
+                  0.25 * diversity + 
+                  0.20 * coherence + 
+                  0.10 * length_factor +
+                  0.10 * sentence_count_factor)
     
     # Add a small random component for exploration (breaks plateaus)
     exploration_noise = np.random.normal(0, 0.02)  # Small Gaussian noise
