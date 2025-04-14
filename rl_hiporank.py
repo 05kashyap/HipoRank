@@ -474,24 +474,80 @@ class UnsupervisedRLHipoRankSummarizer:
         # Get sentence centrality from similarities
         centrality_scores = {}
         
-        # Access the correct attribute based on the object structure
+        # Access the similarity data more safely
         try:
-            # Try to access sent_to_sent which is likely the similarity matrix
+            # Check if similarities has attributes indicating its structure
             if hasattr(similarities, 'sent_to_sent'):
-                similarity_matrix = similarities.sent_to_sent
+                # Handle matrix-based similarity structure
+                sim_matrix = similarities.sent_to_sent
                 
-                # Process the matrix to get centrality scores
+                # Instead of using len(), check if sim_matrix has sections
+                if hasattr(sim_matrix, 'sections'):
+                    # Initialize centrality scores
+                    for i in range(len(flat_sentences)):
+                        centrality_scores[i] = 0
+                    
+                    # Count total sections and sentences
+                    total_sents = 0
+                    for sect_idx, section in enumerate(doc.sections):
+                        sect_size = len(section.sentences)
+                        
+                        # For each sentence in this section
+                        for local_i in range(sect_size):
+                            global_i = total_sents + local_i
+                            
+                            # Initialize centrality
+                            if global_i not in centrality_scores:
+                                centrality_scores[global_i] = 0
+                            
+                            # Sum similarities for this sentence with all others
+                            sect_total = 0
+                            for sect_j_idx, section_j in enumerate(doc.sections):
+                                sect_j_size = len(section_j.sentences)
+                                for local_j in range(sect_j_size):
+                                    # Get similarity from matrix (if available)
+                                    try:
+                                        sim_value = sim_matrix.sections[sect_idx][sect_j_idx][local_i][local_j]
+                                        centrality_scores[global_i] += sim_value
+                                        sect_total += 1
+                                    except (IndexError, AttributeError, KeyError):
+                                        pass
+                        
+                        total_sents += sect_size
+                else:
+                    # Default equal centrality if structure is unknown
+                    print("Warning: Unknown similarity matrix structure")
+                    for i in range(len(flat_sentences)):
+                        centrality_scores[i] = 1.0
+            else:
+                # Try accessing structure using EdgeBased format
+                print("Using directed similarities format")
                 for i in range(len(flat_sentences)):
                     centrality_scores[i] = 0
+                    sent_i_sim = 0
+                    
+                    # Extract global sentence index
+                    sect_i, local_i, _ = flat_sentences[i]
+                    
+                    # For each sentence, calculate centrality
                     for j in range(len(flat_sentences)):
-                        # Need to adjust this access based on the actual structure
-                        if i < len(similarity_matrix) and j < len(similarity_matrix[i]):
-                            centrality_scores[i] += similarity_matrix[i][j]
-            else:
-                # Fallback method: use fixed centrality scores
-                print("Warning: Could not access similarity matrix. Using default centrality.")
-                for i in range(len(flat_sentences)):
-                    centrality_scores[i] = 1.0  # Default equal centrality
+                        sect_j, local_j, _ = flat_sentences[j]
+                        
+                        # Try to access similarity using section-based indexing
+                        try:
+                            # Check if similarities has a different access pattern
+                            if hasattr(similarities, 'sections'):
+                                sim_value = similarities.sections[sect_i][sect_j][local_i][local_j]
+                                centrality_scores[i] += sim_value
+                                sent_i_sim += 1
+                        except (IndexError, AttributeError, KeyError):
+                            # If access fails, no similarity is added
+                            pass
+                    
+                    # If no similarities found, default to 1.0
+                    if sent_i_sim == 0:
+                        centrality_scores[i] = 1.0
+                        
         except Exception as e:
             print(f"Error processing similarities: {e}")
             # Default to equal centrality
