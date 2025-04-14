@@ -930,8 +930,8 @@ class UnsupervisedRLHipoRankSummarizer:
         
         return summary
 
-def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20):
-    """Train the unsupervised RL summarizer on a dataset"""
+def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20, batch_size=4):
+    """Train the unsupervised RL summarizer on a dataset with batch processing"""
     # Setup
     output_dir = Path("unsupervised_rl_output")
     output_dir.mkdir(exist_ok=True)
@@ -985,33 +985,28 @@ def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20):
         cuda=torch.cuda.is_available()
     )
     
-    # Rest of function unchanged...
-    
-    # Rest of the function remains the same...
-    
     # Process documents and train
-    docs = list(dataset)  # Limit to 50 docs for faster training
+    docs = list(dataset)
     all_rewards = []
     
     for epoch in range(num_epochs):
         print(f"Epoch {epoch+1}/{num_epochs}")
-        epoch_rewards = []
         
         # Shuffle documents for each epoch
         random.shuffle(docs)
         
-        for doc_idx, doc in enumerate(tqdm(docs, desc="Training on documents")):
-            # Get HipoRank features
-            embeddings = embedder.get_embeddings(doc)
-            similarities = similarity.get_similarities(embeddings)
-            directed_sims = direction.update_directions(similarities)
-            scores = scorer.get_scores(directed_sims)
-            
-            # Train RL summarizer on this document
-            _, reward = rl_summarizer.train_episode(doc, embeddings, directed_sims, scores)
-            epoch_rewards.append(reward)
-            
-        avg_epoch_reward = sum(epoch_rewards) / len(epoch_rewards)
+        # Process documents in batches
+        epoch_rewards = process_documents_in_batches(
+            docs, 
+            embedder, 
+            similarity, 
+            direction, 
+            scorer, 
+            rl_summarizer, 
+            batch_size=batch_size
+        )
+        
+        avg_epoch_reward = sum(epoch_rewards) / len(epoch_rewards) if epoch_rewards else 0
         all_rewards.append(avg_epoch_reward)
         print(f"Epoch {epoch+1} average reward: {avg_epoch_reward:.4f}")
     
@@ -1255,6 +1250,46 @@ def calculate_rouge(results, docs, rouge_calculator):
     
     return final_scores
 
+def process_documents_in_batches(docs, embedder, similarity, direction, scorer, rl_summarizer, batch_size=4):
+    """Process multiple documents in parallel batches to speed up training"""
+    all_rewards = []
+    
+    # Process documents in batches
+    for i in range(0, len(docs), batch_size):
+        batch_docs = docs[i:i+batch_size]
+        batch_embeddings = []
+        batch_similarities = []
+        batch_directed_sims = []
+        batch_scores = []
+        
+        print(f"Processing batch {i//batch_size + 1}/{math.ceil(len(docs)/batch_size)}")
+        
+        # Step 1: Pre-compute embeddings, similarities and scores for all docs in batch
+        for doc in tqdm(batch_docs, desc="Computing embeddings and similarities"):
+            # Get HipoRank features
+            embeddings = embedder.get_embeddings(doc)
+            similarities = similarity.get_similarities(embeddings)
+            directed_sims = direction.update_directions(similarities)
+            scores = scorer.get_scores(directed_sims)
+            
+            batch_embeddings.append(embeddings)
+            batch_similarities.append(similarities)
+            batch_directed_sims.append(directed_sims)
+            batch_scores.append(scores)
+        
+        # Step 2: Train on all docs in batch
+        for j, doc in enumerate(tqdm(batch_docs, desc="Training on batch")):
+            # Train RL summarizer on this document
+            _, reward = rl_summarizer.train_episode(
+                doc, 
+                batch_embeddings[j], 
+                batch_directed_sims[j], 
+                batch_scores[j]
+            )
+            all_rewards.append(reward)
+            
+    return all_rewards
+
 if __name__ == "__main__":
     import argparse
     
@@ -1263,12 +1298,17 @@ if __name__ == "__main__":
     parser.add_argument("--train", action="store_true", help="Train the model")
     parser.add_argument("--eval", action="store_true", help="Evaluate the model")
     parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs")
+    parser.add_argument("--batch_size", type=int, default=8, help="Number of documents to process in parallel")
     
     args = parser.parse_args()
     
     if args.train:
-        print(f"Training Unsupervised RL-HipoRank on {args.dataset} dataset")
-        rl_summarizer = train_unsupervised_rl_summarizer(dataset_name=args.dataset, num_epochs=args.epochs)
+        print(f"Training Unsupervised RL-HipoRank on {args.dataset} dataset with batch size {args.batch_size}")
+        rl_summarizer = train_unsupervised_rl_summarizer(
+            dataset_name=args.dataset, 
+            num_epochs=args.epochs,
+            batch_size=args.batch_size
+        )
         
         if args.eval:
             print(f"Evaluating trained models on {args.dataset} dataset")
