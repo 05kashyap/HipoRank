@@ -610,10 +610,43 @@ class UnsupervisedRLHipoRankSummarizer:
         
         # Get sentence centrality from HipoRank similarities
         centrality_scores = {}
-        for (i, j), sim in np.ndenumerate(similarities.values):
-            if i not in centrality_scores:
+        
+        # Handle different similarity object formats
+        try:
+            # Original format with .values attribute
+            if hasattr(similarities, 'values'):
+                for (i, j), sim in np.ndenumerate(similarities.values):
+                    if i not in centrality_scores:
+                        centrality_scores[i] = 0
+                    centrality_scores[i] += sim
+            # Alternative format with .similarity_matrix attribute
+            elif hasattr(similarities, 'similarity_matrix'):
+                for i in range(similarities.similarity_matrix.shape[0]):
+                    for j in range(similarities.similarity_matrix.shape[1]):
+                        sim = similarities.similarity_matrix[i, j]
+                        if i not in centrality_scores:
+                            centrality_scores[i] = 0
+                        centrality_scores[i] += sim
+            # Try to access the matrix directly
+            else:
+                try:
+                    similarity_matrix = similarities
+                    for i in range(len(flat_sentences)):
+                        centrality_scores[i] = 0
+                        for j in range(len(flat_sentences)):
+                            if i < similarity_matrix.shape[0] and j < similarity_matrix.shape[1]:
+                                sim = similarity_matrix[i, j]
+                                centrality_scores[i] += sim
+                except:
+                    # If nothing works, initialize with zeros
+                    print("Warning: Could not extract similarity matrix. Using default centrality scores.")
+                    for i in range(len(flat_sentences)):
+                        centrality_scores[i] = 0
+        except Exception as e:
+            print(f"Error processing similarities: {e}")
+            # Default to zeros if we can't process similarities
+            for i in range(len(flat_sentences)):
                 centrality_scores[i] = 0
-            centrality_scores[i] += sim
         
         # Normalize centrality scores
         max_centrality = max(centrality_scores.values()) if centrality_scores else 1.0
