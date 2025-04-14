@@ -1087,6 +1087,7 @@ def train_unsupervised_rl_summarizer_batched(dataset_name="billsum", num_epochs=
         dataset = BillsumDataset(split="train")
     
     # Initialize components
+    print("Initializing components...")
     embedder = BertEmbedder(
         bert_config_path="models/pacssum_models/bert_config.json",
         bert_model_path="models/pacssum_models/pytorch_model_finetuned.bin",
@@ -1101,27 +1102,48 @@ def train_unsupervised_rl_summarizer_batched(dataset_name="billsum", num_epochs=
     feature_cache = FeatureCache(max_size=1000)
     print("Feature cache initialized")
     print(f"Cache size: {feature_cache.max_size}")
+    
     # Detect feature dimension from first document
-    docs = list(dataset)  # Limit to 50 docs for faster training
+    print("Loading documents...")
+    docs = list(dataset)[:50]  # Limit to 50 docs for faster training
     if not docs:
         print("No documents found in dataset")
         return None
     
+    print(f"Loaded {len(docs)} documents")
+    
     # Pre-process first document to get feature dimensions
+    print("Processing first document to detect feature dimensions...")
     doc = docs[0]
     doc_id = getattr(doc, "id", str(id(doc)))
-    embeddings = feature_cache.get_embeddings(doc_id, embedder, doc)
-    similarities = feature_cache.get_similarities(doc_id, similarity, embeddings)
-    directed_sims = feature_cache.get_directed_sims(doc_id, direction, similarities)
-    scores = feature_cache.get_scores(doc_id, scorer, directed_sims)
+    
+    print("Getting embeddings...")
+    embeddings = embedder.get_embeddings(doc)
+    
+    print("Getting similarities...")
+    similarities = similarity.get_similarities(embeddings)
+    
+    print("Getting directed similarities...")
+    directed_sims = direction.update_directions(similarities)
+    
+    print("Getting scores...")
+    scores = scorer.get_scores(directed_sims)
+    
+    # Print debug info about similarities object
+    print(f"Type of similarities: {type(similarities)}")
+    print(f"Similarity object attributes: {dir(similarities)}")
     
     # Create a temporary summarizer to get feature dimensions
+    print("Creating temporary summarizer...")
     temp_summarizer = UnsupervisedRLHipoRankSummarizer(cuda=torch.cuda.is_available())
-    features, _, _ = temp_summarizer.get_state_features(doc, embeddings, directed_sims, scores)
+    
+    print("Getting state features...")
+    features, _, _ = temp_summarizer.get_state_features(doc, embeddings, similarities, scores)
     input_dim = features[0].shape[0] if features else 771
     print(f"Detected input dimension: {input_dim}")
     
     # Create the actual summarizer with the correct dimension
+    print("Creating RL summarizer...")
     rl_summarizer = UnsupervisedRLHipoRankSummarizer(
         input_dim=input_dim,
         num_words=200,
@@ -1134,9 +1156,16 @@ def train_unsupervised_rl_summarizer_batched(dataset_name="billsum", num_epochs=
         cuda=torch.cuda.is_available()
     )
     
-    # Pre-process all documents in batches
+    # Pre-process documents in smaller batches to avoid memory issues
     print("Pre-processing documents...")
-    all_features = batch_process_features(docs, embedder, similarity, direction, scorer, feature_cache)
+    all_features = []
+    batch_size_processing = 5  # Process in smaller batches
+    for i in range(0, len(docs), batch_size_processing):
+        print(f"Processing documents {i} to {min(i+batch_size_processing, len(docs))}")
+        batch_docs = docs[i:i+batch_size_processing]
+        batch_features = batch_process_features(batch_docs, embedder, similarity, direction, scorer, feature_cache)
+        all_features.extend(batch_features)
+        print(f"Processed {len(all_features)}/{len(docs)} documents")
     
     # Process documents and train
     all_rewards = []
