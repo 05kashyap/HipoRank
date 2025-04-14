@@ -611,10 +611,16 @@ class UnsupervisedRLHipoRankSummarizer:
         # Move weights to device
         weights = weights.to(self.device)
         
-        # Convert to tensors
-        state_batch = torch.FloatTensor(batch.state).to(self.device)
-        action_batch = torch.LongTensor(batch.action).unsqueeze(1).to(self.device)
-        reward_batch = torch.FloatTensor(batch.reward).unsqueeze(1).to(self.device)
+        # Convert to tensors more efficiently - using numpy arrays first
+        states = np.array(batch.state)
+        actions = np.array(batch.action)
+        rewards = np.array(batch.reward)
+        
+        # Create tensors from numpy arrays (much faster)
+        state_batch = torch.FloatTensor(states).to(self.device)
+        action_batch = torch.LongTensor(actions).unsqueeze(1).to(self.device)
+        reward_batch = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
+
         
         # Create mask for non-final states
         non_final_mask = torch.BoolTensor([s is not None for s in batch.next_state]).to(self.device)
@@ -792,8 +798,8 @@ class UnsupervisedRLHipoRankSummarizer:
             self.memory.push(
                 current_state,
                 action,
-                next_state,
-                reward,
+                reward,       # Correct position for reward 
+                next_state,   # Correct position for next_state
                 i == len(states) - 1  # done flag
             )
             
