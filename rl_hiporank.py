@@ -203,18 +203,13 @@ class UnsupervisedReward:
             # Get TF-IDF vectors for selected sentences
             summary_vectors = self.tfidf_vectorizer.transform(selected_sentences)
             
-            # Calculate summary centroid and explicitly convert to array
-            summary_centroid = np.asarray(summary_vectors.mean(axis=0))
+            # Calculate summary centroid and ensure proper shape
+            summary_centroid = summary_vectors.mean(axis=0)
+            # Convert sparse matrix to dense array and ensure proper shape for cosine_similarity
+            summary_centroid = np.asarray(summary_centroid).reshape(1, -1)
             
-            # Convert document vectors to array if needed
-            doc_vectors = np.asarray(self.document_vectors)
-            
-            # Reshape the centroid to avoid dimension issues
-            if len(summary_centroid.shape) > 1 and summary_centroid.shape[0] == 1:
-                summary_centroid = summary_centroid.reshape(1, -1)
-            
-            # For each document sentence, calculate similarity to summary centroid
-            similarities = cosine_similarity(summary_centroid, doc_vectors)
+            # Calculate similarities with proper shapes
+            similarities = cosine_similarity(summary_centroid, self.document_vectors)
             
             # Coverage is the average similarity
             coverage_score = np.mean(similarities)
@@ -745,9 +740,22 @@ class UnsupervisedRLHipoRankSummarizer:
             # Get enhanced state representation with context
             enhanced_states, _, _ = self.get_enhanced_state_features(doc, embeddings, similarities, 
                                                                 sentence_scores, selected_indices)
+            # In the train_episode method, where we check for feature dimension mismatch:
             if enhanced_states and enhanced_states[0].shape[0] != self.policy_net.feature_layer[0].in_features:
                 print(f"WARNING: Feature dimension mismatch! Features: {enhanced_states[0].shape[0]}, Model: {self.policy_net.feature_layer[0].in_features}")
-                print("This will likely cause matrix dimension errors. Reinitialize the model with correct input_dim.")
+                print("Reshaping features to match model dimensions")
+                
+                # Resize features to match model's expected input size
+                expected_dim = self.policy_net.feature_layer[0].in_features
+                current_dim = enhanced_states[0].shape[0]
+                
+                # Handle dimension mismatch by truncating or padding
+                if current_dim > expected_dim:
+                    # Truncate to expected dimension
+                    enhanced_states = [state[:expected_dim] for state in enhanced_states]
+                else:
+                    # Pad with zeros to match expected dimension
+                    enhanced_states = [np.pad(state, (0, expected_dim - current_dim)) for state in enhanced_states]
             # Current enhanced state
             current_state = enhanced_states[i].copy()
             
@@ -946,18 +954,21 @@ def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20):
     directed_sims = direction.update_directions(similarities)
     scores = scorer.get_scores(directed_sims)
     
-    # Create a temporary summarizer to get feature dimensions INCLUDING enhanced features
+    # Create a temporary summarizer to get feature dimensions
     temp_summarizer = UnsupervisedRLHipoRankSummarizer(cuda=torch.cuda.is_available())
-    base_features, flat_sentences, all_sentences = temp_summarizer.get_state_features(doc, embeddings, directed_sims, scores)
     enhanced_features, _, _ = temp_summarizer.get_enhanced_state_features(doc, embeddings, directed_sims, scores)
     
-    # Use the enhanced feature dimension as input_dim
-    input_dim = enhanced_features[0].shape[0] if enhanced_features else 776  # Default if calculation fails
-    print(f"Detected enhanced input dimension: {input_dim}")
+    # Get exact dimension from enhanced features
+    if enhanced_features and len(enhanced_features) > 0:
+        input_dim = enhanced_features[0].shape[0]
+    else:
+        input_dim = 776  # Default fallback
     
-    # Create the actual summarizer with the CORRECT dimension
+    print(f"Detected input dimension: {input_dim}")
+    
+    # Create the summarizer with the correct dimension
     rl_summarizer = UnsupervisedRLHipoRankSummarizer(
-        input_dim=input_dim,  # Using enhanced feature dimension
+        input_dim=input_dim,
         num_words=200,
         gamma=0.99,
         lr=0.0003,
@@ -967,6 +978,8 @@ def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20):
         target_update=5,
         cuda=torch.cuda.is_available()
     )
+    
+    # Rest of function unchanged...
     
     # Rest of the function remains the same...
     
