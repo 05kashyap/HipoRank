@@ -473,7 +473,7 @@ class UnsupervisedRLHipoRankSummarizer:
         
         # Get sentence centrality from similarities
         centrality_scores = {}
-        
+        print(similarities)
         # Access the similarity data more safely
         try:
             # Check if similarities has attributes indicating its structure
