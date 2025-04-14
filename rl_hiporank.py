@@ -1066,9 +1066,10 @@ def train_unsupervised_rl_summarizer_batched(dataset_name="billsum", num_epochs=
     
     # Initialize feature cache
     feature_cache = FeatureCache(max_size=1000)
-    
+    print("Feature cache initialized")
+    print(f"Cache size: {feature_cache.max_size}")
     # Detect feature dimension from first document
-    docs = list(dataset)[:50]  # Limit to 50 docs for faster training
+    docs = list(dataset)  # Limit to 50 docs for faster training
     if not docs:
         print("No documents found in dataset")
         return None
