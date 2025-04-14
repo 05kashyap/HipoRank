@@ -456,6 +456,7 @@ class UnsupervisedRLHipoRankSummarizer:
         features = []
         flat_sentences = []
         all_sentences = []
+        
         # Flatten document sentences
         for sect_idx, section in enumerate(doc.sections):
             for local_idx, sentence in enumerate(section.sentences):
@@ -471,91 +472,80 @@ class UnsupervisedRLHipoRankSummarizer:
             for local_idx, sent_emb in enumerate(section_emb.embeddings):
                 sent_embeddings.append(sent_emb)
         
-        # Get sentence centrality from similarities
+        # Get sentence centrality from similarities - new approach
         centrality_scores = {}
-        print(similarities)
-        # Access the similarity data more safely
+        
+        # Initialize centrality scores for all sentences
+        for i in range(len(flat_sentences)):
+            centrality_scores[i] = 0.0
+        
         try:
-            # Check if similarities has attributes indicating its structure
+            # Handle the specific structure we're seeing
             if hasattr(similarities, 'sent_to_sent'):
-                # Handle matrix-based similarity structure
-                sim_matrix = similarities.sent_to_sent
+                print("Processing sentence-to-sentence similarities")
                 
-                # Instead of using len(), check if sim_matrix has sections
-                if hasattr(sim_matrix, 'sections'):
-                    # Initialize centrality scores
-                    for i in range(len(flat_sentences)):
-                        centrality_scores[i] = 0
+                # Process each section's sentence similarities
+                for sect_idx, sent_similarities in enumerate(similarities.sent_to_sent):
+                    if hasattr(sent_similarities, 'similarities') and hasattr(sent_similarities, 'pair_indices'):
+                        sim_values = sent_similarities.similarities
+                        pair_indices = sent_similarities.pair_indices
+                        
+                        # Map pair indices to global indices and update centrality
+                        for i, (idx1, idx2) in enumerate(pair_indices):
+                            if i < len(sim_values):
+                                # Add similarity value to both sentences' centrality
+                                similarity_value = float(sim_values[i])
+                                
+                                # Find global indices for these sentences
+                                # We need to map local section indices to global indices
+                                global_idx1 = None
+                                global_idx2 = None
+                                
+                                # Simple mapping - assuming pairs are within the same section
+                                sent_count = 0
+                                for s_idx, section in enumerate(doc.sections):
+                                    if s_idx == sect_idx:
+                                        # These indices are within this section
+                                        global_idx1 = sent_count + idx1
+                                        global_idx2 = sent_count + idx2
+                                        break
+                                    sent_count += len(section.sentences)
+                                
+                                # Update centrality scores if we found valid indices
+                                if global_idx1 is not None and global_idx1 < len(flat_sentences):
+                                    centrality_scores[global_idx1] += similarity_value
+                                if global_idx2 is not None and global_idx2 < len(flat_sentences):
+                                    centrality_scores[global_idx2] += similarity_value
                     
-                    # Count total sections and sentences
-                    total_sents = 0
-                    for sect_idx, section in enumerate(doc.sections):
-                        sect_size = len(section.sentences)
-                        
-                        # For each sentence in this section
-                        for local_i in range(sect_size):
-                            global_i = total_sents + local_i
-                            
-                            # Initialize centrality
-                            if global_i not in centrality_scores:
-                                centrality_scores[global_i] = 0
-                            
-                            # Sum similarities for this sentence with all others
-                            sect_total = 0
-                            for sect_j_idx, section_j in enumerate(doc.sections):
-                                sect_j_size = len(section_j.sentences)
-                                for local_j in range(sect_j_size):
-                                    # Get similarity from matrix (if available)
-                                    try:
-                                        sim_value = sim_matrix.sections[sect_idx][sect_j_idx][local_i][local_j]
-                                        centrality_scores[global_i] += sim_value
-                                        sect_total += 1
-                                    except (IndexError, AttributeError, KeyError):
-                                        pass
-                        
-                        total_sents += sect_size
-                else:
-                    # Default equal centrality if structure is unknown
-                    print("Warning: Unknown similarity matrix structure")
-                    for i in range(len(flat_sentences)):
-                        centrality_scores[i] = 1.0
+                # If we couldn't get meaningful centrality from the structure, use HipoRank scores
+                if all(score == 0.0 for score in centrality_scores.values()):
+                    print("Using HipoRank scores for centrality")
+                    for i, (sect_idx, local_idx, _) in enumerate(flat_sentences):
+                        for score, s_idx, l_idx, _ in sentence_scores:
+                            if s_idx == sect_idx and l_idx == local_idx:
+                                centrality_scores[i] = score
+                                break
             else:
-                # Try accessing structure using EdgeBased format
-                print("Using directed similarities format")
-                for i in range(len(flat_sentences)):
-                    centrality_scores[i] = 0
-                    sent_i_sim = 0
-                    
-                    # Extract global sentence index
-                    sect_i, local_i, _ = flat_sentences[i]
-                    
-                    # For each sentence, calculate centrality
-                    for j in range(len(flat_sentences)):
-                        sect_j, local_j, _ = flat_sentences[j]
-                        
-                        # Try to access similarity using section-based indexing
-                        try:
-                            # Check if similarities has a different access pattern
-                            if hasattr(similarities, 'sections'):
-                                sim_value = similarities.sections[sect_i][sect_j][local_i][local_j]
-                                centrality_scores[i] += sim_value
-                                sent_i_sim += 1
-                        except (IndexError, AttributeError, KeyError):
-                            # If access fails, no similarity is added
-                            pass
-                    
-                    # If no similarities found, default to 1.0
-                    if sent_i_sim == 0:
-                        centrality_scores[i] = 1.0
-                        
+                print("Fallback to sentence scores for centrality")
+                # Use HipoRank scores as centrality when similarity structure is unknown
+                for i, (sect_idx, local_idx, _) in enumerate(flat_sentences):
+                    for score, s_idx, l_idx, _ in sentence_scores:
+                        if s_idx == sect_idx and l_idx == local_idx:
+                            centrality_scores[i] = score
+                            break
         except Exception as e:
-            print(f"Error processing similarities: {e}")
-            # Default to equal centrality
-            for i in range(len(flat_sentences)):
-                centrality_scores[i] = 1.0
+            print(f"Error processing similarities, falling back to scores: {e}")
+            # Fallback to using HipoRank scores as centrality
+            for i, (sect_idx, local_idx, _) in enumerate(flat_sentences):
+                for score, s_idx, l_idx, _ in sentence_scores:
+                    if s_idx == sect_idx and l_idx == local_idx:
+                        centrality_scores[i] = score
+                        break
         
         # Normalize centrality scores
         max_centrality = max(centrality_scores.values()) if centrality_scores else 1.0
+        if max_centrality == 0:
+            max_centrality = 1.0  # Avoid division by zero
         normalized_centrality = {k: v / max_centrality for k, v in centrality_scores.items()}
         
         # Create features for each sentence
@@ -568,26 +558,32 @@ class UnsupervisedRLHipoRankSummarizer:
                     break
             
             # Position features
-            section_position = sect_idx / len(doc.sections)
-            sentence_position = local_idx / len(doc.sections[sect_idx].sentences)
+            section_position = sect_idx / max(1, len(doc.sections))
+            sentence_position = local_idx / max(1, len(doc.sections[sect_idx].sentences))
             
             # Normalize HipoRank score
-            norm_score = hipo_score / max(s[0] for s in sentence_scores) if sentence_scores else 0
+            max_score = max(s[0] for s in sentence_scores) if sentence_scores else 1.0
+            if max_score == 0:
+                max_score = 1.0  # Avoid division by zero
+            norm_score = hipo_score / max_score
             
             # Document centrality from similarities
             centrality = normalized_centrality.get(i, 0.0)
             
             # Combine features
-            feature_vector = np.concatenate([
-                sent_embeddings[i],       # Sentence embedding
-                [section_position],       # Position of section in document
-                [sentence_position],      # Position of sentence in section
-                [norm_score],             # Normalized HipoRank score
-                [centrality]              # Sentence centrality in document
-            ])
-            
-            features.append(feature_vector)
-            
+            if i < len(sent_embeddings):
+                feature_vector = np.concatenate([
+                    sent_embeddings[i],       # Sentence embedding
+                    [section_position],       # Position of section in document
+                    [sentence_position],      # Position of sentence in section
+                    [norm_score],             # Normalized HipoRank score
+                    [centrality]              # Sentence centrality in document
+                ])
+                
+                features.append(feature_vector)
+            else:
+                print(f"Warning: Missing embedding for sentence {i}")
+                
         return features, flat_sentences, all_sentences
     
     def select_action(self, state, training=True):
