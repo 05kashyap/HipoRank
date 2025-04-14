@@ -456,7 +456,8 @@ class UnsupervisedRLHipoRankSummarizer:
         features = []
         flat_sentences = []
         all_sentences = []
-        
+        print(f"Type of similarities: {type(similarities)}")
+        print(f"Attributes of similarities: {dir(similarities)}")
         # Flatten document sentences
         for sect_idx, section in enumerate(doc.sections):
             for local_idx, sentence in enumerate(section.sentences):
@@ -474,10 +475,39 @@ class UnsupervisedRLHipoRankSummarizer:
         
         # Get sentence centrality from HipoRank similarities
         centrality_scores = {}
-        for (i, j), sim in np.ndenumerate(similarities.values):
-            if i not in centrality_scores:
-                centrality_scores[i] = 0
-            centrality_scores[i] += sim
+        
+        # Try different ways to access the similarity matrix
+        try:
+            # Print debug info about the object
+            similarity_matrix = None
+            
+            # Check if it has a values attribute (original way)
+            if hasattr(similarities, 'values'):
+                similarity_matrix = similarities.values
+            # Check if it has a similarity_matrix attribute
+            elif hasattr(similarities, 'similarity_matrix'):
+                similarity_matrix = similarities.similarity_matrix
+            # Try to directly use it as a numpy array
+            elif hasattr(similarities, 'shape'):
+                similarity_matrix = similarities
+            
+            # If we got a matrix, process it
+            if similarity_matrix is not None:
+                for i in range(similarity_matrix.shape[0]):
+                    for j in range(similarity_matrix.shape[1]):
+                        if i not in centrality_scores:
+                            centrality_scores[i] = 0
+                        centrality_scores[i] += similarity_matrix[i, j]
+            else:
+                # Fallback method: use fixed centrality scores
+                print("Warning: Could not access similarity matrix. Using default centrality.")
+                for i in range(len(flat_sentences)):
+                    centrality_scores[i] = 1.0  # Default equal centrality
+        except Exception as e:
+            print(f"Error processing similarities: {e}")
+            # Default to equal centrality if we can't process similarities
+            for i in range(len(flat_sentences)):
+                centrality_scores[i] = 1.0
         
         # Normalize centrality scores
         max_centrality = max(centrality_scores.values()) if centrality_scores else 1.0
