@@ -456,8 +456,6 @@ class UnsupervisedRLHipoRankSummarizer:
         features = []
         flat_sentences = []
         all_sentences = []
-        print(f"Type of similarities: {type(similarities)}")
-        print(f"Attributes of similarities: {dir(similarities)}")
         # Flatten document sentences
         for sect_idx, section in enumerate(doc.sections):
             for local_idx, sentence in enumerate(section.sentences):
@@ -473,31 +471,22 @@ class UnsupervisedRLHipoRankSummarizer:
             for local_idx, sent_emb in enumerate(section_emb.embeddings):
                 sent_embeddings.append(sent_emb)
         
-        # Get sentence centrality from HipoRank similarities
+        # Get sentence centrality from similarities
         centrality_scores = {}
         
-        # Try different ways to access the similarity matrix
+        # Access the correct attribute based on the object structure
         try:
-            # Print debug info about the object
-            similarity_matrix = None
-            
-            # Check if it has a values attribute (original way)
-            if hasattr(similarities, 'values'):
-                similarity_matrix = similarities.values
-            # Check if it has a similarity_matrix attribute
-            elif hasattr(similarities, 'similarity_matrix'):
-                similarity_matrix = similarities.similarity_matrix
-            # Try to directly use it as a numpy array
-            elif hasattr(similarities, 'shape'):
-                similarity_matrix = similarities
-            
-            # If we got a matrix, process it
-            if similarity_matrix is not None:
-                for i in range(similarity_matrix.shape[0]):
-                    for j in range(similarity_matrix.shape[1]):
-                        if i not in centrality_scores:
-                            centrality_scores[i] = 0
-                        centrality_scores[i] += similarity_matrix[i, j]
+            # Try to access sent_to_sent which is likely the similarity matrix
+            if hasattr(similarities, 'sent_to_sent'):
+                similarity_matrix = similarities.sent_to_sent
+                
+                # Process the matrix to get centrality scores
+                for i in range(len(flat_sentences)):
+                    centrality_scores[i] = 0
+                    for j in range(len(flat_sentences)):
+                        # Need to adjust this access based on the actual structure
+                        if i < len(similarity_matrix) and j < len(similarity_matrix[i]):
+                            centrality_scores[i] += similarity_matrix[i][j]
             else:
                 # Fallback method: use fixed centrality scores
                 print("Warning: Could not access similarity matrix. Using default centrality.")
@@ -505,7 +494,7 @@ class UnsupervisedRLHipoRankSummarizer:
                     centrality_scores[i] = 1.0  # Default equal centrality
         except Exception as e:
             print(f"Error processing similarities: {e}")
-            # Default to equal centrality if we can't process similarities
+            # Default to equal centrality
             for i in range(len(flat_sentences)):
                 centrality_scores[i] = 1.0
         
@@ -899,7 +888,7 @@ def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20):
     # Create a temporary summarizer to get feature dimensions
     temp_summarizer = UnsupervisedRLHipoRankSummarizer(cuda=torch.cuda.is_available())
     features, _, _ = temp_summarizer.get_state_features(doc, embeddings, directed_sims, scores)
-    input_dim = features[0].shape[0] if features else 771
+    input_dim = features[0].shape[0] if features else 772
     print(f"Detected input dimension: {input_dim}")
     
     # Create the actual summarizer with the correct dimension
@@ -916,7 +905,7 @@ def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20):
     )
     
     # Process documents and train
-    docs = list(dataset)[:50]  # Limit to 50 docs for faster training
+    docs = list(dataset)  # Limit to 50 docs for faster training
     all_rewards = []
     
     for epoch in range(num_epochs):
