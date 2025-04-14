@@ -193,6 +193,7 @@ class UnsupervisedReward:
         # Get document vectors
         self.document_vectors = self.tfidf_vectorizer.transform(sentences)
 
+    # Fix for the coverage calculation in UnsupervisedReward class
     def calculate_coverage(self, selected_sentences):
         """Calculate how well the summary covers important document content"""
         if not selected_sentences or self.document_vectors is None:
@@ -202,11 +203,18 @@ class UnsupervisedReward:
             # Get TF-IDF vectors for selected sentences
             summary_vectors = self.tfidf_vectorizer.transform(selected_sentences)
             
-            # Calculate summary centroid
-            summary_centroid = summary_vectors.mean(axis=0)
+            # Calculate summary centroid and explicitly convert to array
+            summary_centroid = np.asarray(summary_vectors.mean(axis=0))
+            
+            # Convert document vectors to array if needed
+            doc_vectors = np.asarray(self.document_vectors)
+            
+            # Reshape the centroid to avoid dimension issues
+            if len(summary_centroid.shape) > 1 and summary_centroid.shape[0] == 1:
+                summary_centroid = summary_centroid.reshape(1, -1)
             
             # For each document sentence, calculate similarity to summary centroid
-            similarities = cosine_similarity(summary_centroid, self.document_vectors)
+            similarities = cosine_similarity(summary_centroid, doc_vectors)
             
             # Coverage is the average similarity
             coverage_score = np.mean(similarities)
@@ -480,10 +488,8 @@ class UnsupervisedRLHipoRankSummarizer:
             centrality_scores[i] = 0.0
         
         try:
-            # Handle the specific structure we're seeing
-            if hasattr(similarities, 'sent_to_sent'):
-                print("Processing sentence-to-sentence similarities")
-                
+            # Handle the specific structure we're seeing, fixed now
+            if hasattr(similarities, 'sent_to_sent'):                
                 # Process each section's sentence similarities
                 for sect_idx, sent_similarities in enumerate(similarities.sent_to_sent):
                     if hasattr(sent_similarities, 'similarities') and hasattr(sent_similarities, 'pair_indices'):
@@ -739,6 +745,9 @@ class UnsupervisedRLHipoRankSummarizer:
             # Get enhanced state representation with context
             enhanced_states, _, _ = self.get_enhanced_state_features(doc, embeddings, similarities, 
                                                                 sentence_scores, selected_indices)
+            if enhanced_states and enhanced_states[0].shape[0] != self.policy_net.feature_layer[0].in_features:
+                print(f"WARNING: Feature dimension mismatch! Features: {enhanced_states[0].shape[0]}, Model: {self.policy_net.feature_layer[0].in_features}")
+                print("This will likely cause matrix dimension errors. Reinitialize the model with correct input_dim.")
             # Current enhanced state
             current_state = enhanced_states[i].copy()
             
@@ -937,15 +946,18 @@ def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20):
     directed_sims = direction.update_directions(similarities)
     scores = scorer.get_scores(directed_sims)
     
-    # Create a temporary summarizer to get feature dimensions
+    # Create a temporary summarizer to get feature dimensions INCLUDING enhanced features
     temp_summarizer = UnsupervisedRLHipoRankSummarizer(cuda=torch.cuda.is_available())
-    features, _, _ = temp_summarizer.get_state_features(doc, embeddings, directed_sims, scores)
-    input_dim = features[0].shape[0] if features else 772
-    print(f"Detected input dimension: {input_dim}")
+    base_features, flat_sentences, all_sentences = temp_summarizer.get_state_features(doc, embeddings, directed_sims, scores)
+    enhanced_features, _, _ = temp_summarizer.get_enhanced_state_features(doc, embeddings, directed_sims, scores)
     
-    # Create the actual summarizer with the correct dimension
+    # Use the enhanced feature dimension as input_dim
+    input_dim = enhanced_features[0].shape[0] if enhanced_features else 776  # Default if calculation fails
+    print(f"Detected enhanced input dimension: {input_dim}")
+    
+    # Create the actual summarizer with the CORRECT dimension
     rl_summarizer = UnsupervisedRLHipoRankSummarizer(
-        input_dim=input_dim,
+        input_dim=input_dim,  # Using enhanced feature dimension
         num_words=200,
         gamma=0.99,
         lr=0.0003,
@@ -955,6 +967,8 @@ def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20):
         target_update=5,
         cuda=torch.cuda.is_available()
     )
+    
+    # Rest of the function remains the same...
     
     # Process documents and train
     docs = list(dataset)  # Limit to 50 docs for faster training
