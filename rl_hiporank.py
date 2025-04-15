@@ -1272,7 +1272,6 @@ def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20, batc
             direction, 
             scorer, 
             rl_summarizer, 
-            batch_size=batch_size
         )
         
         avg_epoch_reward = sum(epoch_rewards) / len(epoch_rewards) if epoch_rewards else 0
