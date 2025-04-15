@@ -1616,6 +1616,9 @@ def process_documents_in_parallel(docs, embedder, similarity, direction, scorer,
     """Process multiple documents in true parallel using multiprocessing"""
     all_rewards = []
     
+    # Set multiprocessing start method to 'spawn' for CUDA compatibility
+    multiprocessing.set_start_method('spawn', force=True)
+    
     # Determine number of workers
     if max_workers is None:
         max_workers = max(1, multiprocessing.cpu_count() - 1)  # Leave one CPU free
