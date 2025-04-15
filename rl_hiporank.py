@@ -22,6 +22,8 @@ from hipo_rank.similarities.cos import CosSimilarity
 from hipo_rank.directions.edge import EdgeBased
 from hipo_rank.scorers.add import AddScorer
 from hipo_rank.summarizers.default import DefaultSummarizer
+import multiprocessing
+from functools import partial
 
 # Download NLTK resources if not present
 try:
@@ -815,6 +817,158 @@ class UnsupervisedRLHipoRankSummarizer:
         
         self.episode_rewards.append(avg_reward)
         return summary, avg_reward
+    def train_episode_optimized(self, doc, embeddings, similarities, sentence_scores):
+        """Train on a single document with sample selection optimization"""
+        # Get base state features for all sentences
+        states, flat_sentences, all_sentences = self.get_state_features(doc, embeddings, similarities, sentence_scores)
+        
+        # Select candidate sentences for training
+        candidate_indices = self.select_candidate_sentences(doc, sentence_scores, training=True)
+        
+        # Initialize summary
+        selected_indices = []
+        selected_sentences = []
+        total_words = 0
+        episode_rewards = []
+        
+        # For each candidate sentence, decide whether to include it
+        for i in candidate_indices:
+            # Get enhanced state representation with context
+            enhanced_states, _, _ = self.get_enhanced_state_features(doc, embeddings, similarities, 
+                                                                sentence_scores, selected_indices)
+            # Check for feature dimension mismatch
+            if enhanced_states and enhanced_states[0].shape[0] != self.policy_net.feature_layer[0].in_features:
+                print(f"WARNING: Feature dimension mismatch! Features: {enhanced_states[0].shape[0]}, Model: {self.policy_net.feature_layer[0].in_features}")
+                expected_dim = self.policy_net.feature_layer[0].in_features
+                current_dim = enhanced_states[0].shape[0]
+                
+                # Handle dimension mismatch by truncating or padding
+                if current_dim > expected_dim:
+                    enhanced_states = [state[:expected_dim] for state in enhanced_states]
+                else:
+                    enhanced_states = [np.pad(state, (0, expected_dim - current_dim)) for state in enhanced_states]
+                    
+            # Current enhanced state
+            if i < len(enhanced_states):
+                current_state = enhanced_states[i].copy()
+                
+                # Select action (1 = include, 0 = exclude)
+                action = self.select_action(current_state, training=True)
+                
+                # Execute action and observe next state
+                prev_selected = selected_sentences.copy()
+                
+                if action == 1:
+                    # Include sentence in summary
+                    _, _, sentence = flat_sentences[i]
+                    sentence_words = len(sentence.split())
+                    
+                    # Check if adding would exceed word limit
+                    if total_words + sentence_words <= self.num_words:
+                        selected_indices.append(i)
+                        selected_sentences.append(sentence)
+                        total_words += sentence_words
+                
+                # Compute unsupervised reward
+                reward = self.reward_calculator.get_reward(selected_sentences, flat_sentences)
+                
+                # Add reward shaping: penalize if nothing changes
+                if action == 1 and prev_selected == selected_sentences:
+                    reward -= 0.05
+                    
+                episode_rewards.append(reward)
+                
+                # Determine next state - use the next candidate, or None if last
+                next_idx = candidate_indices.index(i) + 1
+                next_state = enhanced_states[candidate_indices[next_idx]] if next_idx < len(candidate_indices) else None
+                
+                # Store transition in memory
+                self.memory.push(
+                    current_state,
+                    action,
+                    reward,
+                    next_state,
+                    next_idx >= len(candidate_indices)  # done flag
+                )
+                
+                # Update the model every 4 steps
+                if len(episode_rewards) % 4 == 0:
+                    loss = self.update_model()
+        
+        # Return final summary and average reward
+        avg_reward = sum(episode_rewards) / len(episode_rewards) if episode_rewards else 0
+        summary = [(sentence, 1.0, sect_idx, local_idx, i) 
+                for i, (sect_idx, local_idx, sentence) in enumerate(flat_sentences) 
+                if i in selected_indices]
+        
+        self.episode_rewards.append(avg_reward)
+        return summary, avg_reward
+
+    def select_candidate_sentences(self, doc, sentence_scores, training=True):
+        """
+        Select a subset of sentences as candidates to improve efficiency.
+        
+        Args:
+            doc: The document object
+            sentence_scores: Scores from HipoRank
+            training: Whether this is for training or evaluation
+        
+        Returns:
+            List of indices of selected candidate sentences
+        """
+        flat_sentences = []
+        
+        # Flatten document sentences
+        for sect_idx, section in enumerate(doc.sections):
+            for local_idx, sentence in enumerate(section.sentences):
+                flat_sentences.append((sect_idx, local_idx, sentence))
+        
+        # During training, focus only on promising sentences
+        if training:
+            # Convert scores to a more usable format for filtering
+            scored_indices = []
+            for score, sect_idx, local_idx, global_idx in sentence_scores:
+                # Find the corresponding index in flat_sentences
+                for i, (s_idx, l_idx, _) in enumerate(flat_sentences):
+                    if s_idx == sect_idx and l_idx == local_idx:
+                        scored_indices.append((i, score))
+                        break
+            
+            # Sort by score descending
+            scored_indices.sort(key=lambda x: x[1], reverse=True)
+            
+            # Select top candidates based on score (top 30%)
+            num_sentences = len(flat_sentences)
+            num_candidates = max(int(num_sentences * 0.3), 10)  # At least 10 sentences
+            
+            # Include sentences with score above threshold
+            threshold = 0.1
+            candidate_indices = [idx for idx, score in scored_indices[:num_candidates] if score > threshold]
+            
+            # Also include a small random sample from the rest to enable exploration
+            remaining_indices = [idx for idx, score in scored_indices[num_candidates:]]
+            if remaining_indices:
+                random_sample_size = min(5, len(remaining_indices))
+                random_indices = random.sample(remaining_indices, random_sample_size)
+                candidate_indices.extend(random_indices)
+                
+            return candidate_indices
+        else:
+            # For evaluation, consider all sentences but prioritize processing of high-scoring ones
+            # Convert scores to a more usable format
+            scored_indices = []
+            for score, sect_idx, local_idx, global_idx in sentence_scores:
+                for i, (s_idx, l_idx, _) in enumerate(flat_sentences):
+                    if s_idx == sect_idx and l_idx == local_idx:
+                        scored_indices.append((i, score))
+                        break
+            
+            # Sort by score
+            scored_indices.sort(key=lambda x: x[1], reverse=True)
+            
+            # Return all indices, but in order of score
+            return [idx for idx, _ in scored_indices]
+
     
     def get_summary(self, doc, sorted_scores):
         """Generate a summary using the trained policy network with a beam search approach"""
@@ -929,6 +1083,121 @@ class UnsupervisedRLHipoRankSummarizer:
                 if i in selected_indices]
         
         return summary
+    
+    def get_summary_optimized(self, doc, sorted_scores):
+        """Generate a summary using the trained policy network with an optimized beam search approach"""
+        # Process document
+        embedder = BertEmbedder(
+            bert_config_path="models/pacssum_models/bert_config.json",
+            bert_model_path="models/pacssum_models/pytorch_model_finetuned.bin",
+            bert_tokenizer="bert-base-uncased",
+            cuda=torch.cuda.is_available()
+        )
+        similarity = CosSimilarity()
+        direction = EdgeBased()
+        
+        # Process document
+        embeddings = embedder.get_embeddings(doc)
+        similarities = similarity.get_similarities(embeddings)
+        directed_sims = direction.update_directions(similarities)
+        
+        # Get state features for all sentences
+        states, flat_sentences, all_sentences = self.get_state_features(doc, embeddings, similarities, sorted_scores)
+        
+        # Select candidate sentences for evaluation (prioritize but include all)
+        candidate_indices = self.select_candidate_sentences(doc, sorted_scores, training=False)
+        
+        # Implementation of beam search for evaluation only
+        beam_width = 5  # Increased from 3 for better quality
+        beam_candidates = [([], [], 0)]  # (selected_indices, selected_sentences, total_words)
+        
+        for sent_idx in candidate_indices:
+            sect_idx, local_idx, sentence = flat_sentences[sent_idx]
+            sentence_words = len(sentence.split())
+            
+            new_candidates = []
+            
+            # For each beam candidate
+            for selected_idxs, selected_sents, total_words in beam_candidates:
+                # Get enhanced state with context of already selected sentences
+                enhanced_states, _, _ = self.get_enhanced_state_features(doc, embeddings, similarities, 
+                                                                    sorted_scores, selected_idxs)
+                if sent_idx >= len(enhanced_states):
+                    continue
+                    
+                current_state = enhanced_states[sent_idx]
+                
+                # Get action probabilities from policy network
+                with torch.no_grad():
+                    state_tensor = torch.FloatTensor([current_state]).to(self.device)
+                    q_values = self.policy_net(state_tensor).cpu().numpy()[0]
+                
+                # Both include and skip actions with their Q-values
+                for action in [1, 0]:  # Include or skip
+                    new_idxs = selected_idxs.copy()
+                    new_sents = selected_sents.copy()
+                    new_total_words = total_words
+                    
+                    if action == 1 and total_words + sentence_words <= self.num_words:
+                        new_idxs.append(sent_idx)
+                        new_sents.append(sentence)
+                        new_total_words += sentence_words
+                        
+                        # Calculate beam score - combination of Q-value and reward metrics
+                        action_value = q_values[action]
+                        reward_score = self.reward_calculator.get_reward(new_sents, flat_sentences)
+                        # Weighted combination favoring actual rewards
+                        beam_score = 0.3 * action_value + 0.7 * reward_score
+                        
+                        # Only add if this creates a change
+                        if selected_idxs != new_idxs:
+                            new_candidates.append((new_idxs, new_sents, new_total_words, beam_score))
+                    
+                    elif action == 0:  # Skip action
+                        action_value = q_values[action]
+                        reward_score = self.reward_calculator.get_reward(new_sents, flat_sentences)
+                        beam_score = 0.3 * action_value + 0.7 * reward_score
+                        new_candidates.append((new_idxs, new_sents, new_total_words, beam_score))
+            
+            # Keep top beam_width candidates
+            if new_candidates:
+                beam_candidates = [(idxs, sents, words) for idxs, sents, words, score in 
+                                sorted(new_candidates, key=lambda x: x[3], reverse=True)[:beam_width]]
+        
+        # Select best beam result
+        if beam_candidates:
+            selected_indices, selected_sentences, _ = max(beam_candidates, 
+                                                        key=lambda x: self.reward_calculator.get_reward(x[1], flat_sentences))
+        else:
+            selected_indices, selected_sentences = [], []
+        
+        # Backfill if needed
+        if len(selected_sentences) < 3 or sum(len(s.split()) for s in selected_sentences) < self.num_words * 0.5:
+            # Sort by score
+            sorted_by_score = sorted(sorted_scores, key=lambda x: x[0], reverse=True)
+            
+            for score, sect_idx, local_idx, _ in sorted_by_score:
+                if score < 0.05:  # Skip very low-scoring sentences
+                    continue
+                    
+                sentence = doc.sections[sect_idx].sentences[local_idx]
+                sent_idx = next((i for i, (s_idx, l_idx, _) in enumerate(flat_sentences) 
+                            if s_idx == sect_idx and l_idx == local_idx), None)
+                
+                if sent_idx is not None and sent_idx not in selected_indices:
+                    sentence_words = len(sentence.split())
+                    total_words = sum(len(s.split()) for s in selected_sentences)
+                    if total_words + sentence_words <= self.num_words:
+                        selected_sentences.append(sentence)
+                        selected_indices.append(sent_idx)
+        
+        # Create summary in the format expected by HipoRank
+        summary = [(sentence, 1.0, sect_idx, local_idx, i) 
+                for i, (sect_idx, local_idx, sentence) in enumerate(flat_sentences) 
+                if i in selected_indices]
+        
+        return summary
+
 
 def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20, batch_size=4):
     """Train the unsupervised RL summarizer on a dataset with batch processing"""
@@ -996,7 +1265,7 @@ def train_unsupervised_rl_summarizer(dataset_name="billsum", num_epochs=20, batc
         random.shuffle(docs)
         
         # Process documents in batches
-        epoch_rewards = process_documents_in_batches(
+        epoch_rewards = process_documents_in_parallel(
             docs, 
             embedder, 
             similarity, 
@@ -1084,10 +1353,10 @@ def evaluate_both_summarizers(dataset_name="billsum"):
         scores = scorer.get_scores(directed_sims)
         
         # Generate summary with Unsupervised RL
-        rl_summary = rl_summarizer.get_summary(doc, scores)
+        rl_summary = rl_summarizer.get_summary_optimized(doc, scores)
         
         # Generate summary with HipoRank
-        hiporank_summary = hiporank_summarizer.get_summary(doc, scores)
+        hiporank_summary = hiporank_summarizer.get_summary_optimized(doc, scores)
         
         doc_id = getattr(doc, "id", "unknown")
         
@@ -1261,33 +1530,121 @@ def process_documents_in_batches(docs, embedder, similarity, direction, scorer, 
         batch_similarities = []
         batch_directed_sims = []
         batch_scores = []
+        valid_indices = []  # Track which documents were processed successfully
         
         print(f"Processing batch {i//batch_size + 1}/{math.ceil(len(docs)/batch_size)}")
         
         # Step 1: Pre-compute embeddings, similarities and scores for all docs in batch
-        for doc in tqdm(batch_docs, desc="Computing embeddings and similarities"):
-            # Get HipoRank features
-            embeddings = embedder.get_embeddings(doc)
-            similarities = similarity.get_similarities(embeddings)
-            directed_sims = direction.update_directions(similarities)
-            scores = scorer.get_scores(directed_sims)
-            
-            batch_embeddings.append(embeddings)
-            batch_similarities.append(similarities)
-            batch_directed_sims.append(directed_sims)
-            batch_scores.append(scores)
+        for j, doc in enumerate(tqdm(batch_docs, desc="Computing embeddings and similarities")):
+            try:
+                # Check if document has content
+                if not doc.sections or all(len(section.sentences) == 0 for section in doc.sections):
+                    print(f"Skipping empty document at index {i+j}")
+                    continue
+                
+                # Get HipoRank features
+                embeddings = embedder.get_embeddings(doc)
+                
+                # Check if embeddings were successfully created
+                if not hasattr(embeddings, 'section') or len(embeddings.section) == 0:
+                    print(f"Skipping document at index {i+j} due to missing embeddings")
+                    continue
+                    
+                similarities = similarity.get_similarities(embeddings)
+                directed_sims = direction.update_directions(similarities)
+                scores = scorer.get_scores(directed_sims)
+                
+                batch_embeddings.append(embeddings)
+                batch_similarities.append(similarities)
+                batch_directed_sims.append(directed_sims)
+                batch_scores.append(scores)
+                valid_indices.append(j)
+                
+            except Exception as e:
+                print(f"Error processing document at index {i+j}: {str(e)}")
+                continue
         
-        # Step 2: Train on all docs in batch
-        for j, doc in enumerate(tqdm(batch_docs, desc="Training on batch")):
-            # Train RL summarizer on this document
-            _, reward = rl_summarizer.train_episode(
-                doc, 
-                batch_embeddings[j], 
-                batch_directed_sims[j], 
-                batch_scores[j]
-            )
-            all_rewards.append(reward)
+        # Step 2: Train on successfully processed docs in batch
+        for idx, j in enumerate(valid_indices):
+            try:
+                doc = batch_docs[j]
+                # Train RL summarizer on this document
+                _, reward = rl_summarizer.train_episode_optimized(
+                    doc, 
+                    batch_embeddings[idx], 
+                    batch_directed_sims[idx], 
+                    batch_scores[idx]
+                )
+                all_rewards.append(reward)
+            except Exception as e:
+                print(f"Error training on document at index {i+j}: {str(e)}")
+                continue
             
+    return all_rewards
+
+def process_document_worker(doc, embedder, similarity, direction, scorer, rl_summarizer):
+    """Worker function to process a single document in parallel"""
+    try:
+        # Check if document has content
+        if not doc.sections or all(len(section.sentences) == 0 for section in doc.sections):
+            return None, "Empty document"
+        
+        # Get HipoRank features
+        embeddings = embedder.get_embeddings(doc)
+        
+        # Check if embeddings were successfully created
+        if not hasattr(embeddings, 'section') or len(embeddings.section) == 0:
+            return None, "Missing embeddings"
+            
+        similarities = similarity.get_similarities(embeddings)
+        directed_sims = direction.update_directions(similarities)
+        scores = scorer.get_scores(directed_sims)
+        
+        # Train RL summarizer on this document (using optimized training)
+        summary, reward = rl_summarizer.train_episode_optimized(
+            doc, 
+            embeddings, 
+            directed_sims, 
+            scores
+        )
+        
+        return reward, None  # Return reward and no error
+    except Exception as e:
+        return None, str(e)  # Return error message
+
+# Replace process_documents_in_batches with this truly parallel version
+def process_documents_in_parallel(docs, embedder, similarity, direction, scorer, rl_summarizer, max_workers=None):
+    """Process multiple documents in true parallel using multiprocessing"""
+    all_rewards = []
+    
+    # Determine number of workers
+    if max_workers is None:
+        max_workers = max(1, multiprocessing.cpu_count() - 1)  # Leave one CPU free
+    
+    print(f"Processing {len(docs)} documents in parallel with {max_workers} workers")
+    
+    # Create a pool of workers
+    with multiprocessing.Pool(processes=max_workers) as pool:
+        # Create a partial function with fixed parameters
+        worker_func = partial(
+            process_document_worker,
+            embedder=embedder,
+            similarity=similarity,
+            direction=direction,
+            scorer=scorer,
+            rl_summarizer=rl_summarizer
+        )
+        
+        # Process all documents in parallel and collect results
+        results = list(tqdm(pool.imap(worker_func, docs), total=len(docs), desc="Processing documents in parallel"))
+    
+    # Collect rewards from successful processing
+    for reward, error in results:
+        if reward is not None:
+            all_rewards.append(reward)
+        elif error:
+            print(f"Error processing document: {error}")
+    
     return all_rewards
 
 if __name__ == "__main__":
